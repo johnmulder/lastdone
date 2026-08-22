@@ -7,30 +7,7 @@ Unix-like goals without turning it into a task manager.
 
 ## Before the MVP
 
-### 1. Keep the first implementation standard-library sized
-
-**Gap**
-
-The design calls for low complexity, but it does not constrain the implementation
-shape. A command framework, ORM, repository layer, and plugin system could add
-more surface area than the four-command MVP itself.
-
-**Approach**
-
-Build the MVP with Python's `argparse`, `sqlite3`, `json`, `datetime`, `pathlib`,
-and `uuid` modules. Separate only the CLI parsing, database operations, and
-formatting that genuinely need independent tests.
-
-**Implementation considerations**
-
-- Prefer a few small modules over a framework-shaped package hierarchy.
-- Test through the executable against a temporary database; add focused unit
-  tests only for time and interval logic with meaningful edge cases.
-- Inject the clock and database path at the boundary so tests remain
-  deterministic without a general dependency-injection system.
-- Add a formatter and linter only if they remove recurring review work.
-
-### 2. Specify data-location overrides and concurrency behavior
+### 1. Specify data-location overrides and concurrency behavior
 
 **Gap**
 
@@ -55,7 +32,7 @@ Use short SQLite transactions and a modest busy timeout for concurrent writers.
 
 ## Immediately after the MVP
 
-### 3. Provide lossless export, idempotent import, and basic diagnostics
+### 2. Provide lossless export, idempotent import, and basic diagnostics
 
 **Gap**
 
@@ -79,7 +56,7 @@ stream and treat an already-present identical ID as a no-op.
 - Have `doctor` check schema version, integrity, permissions, and parseability;
   it should not mutate data unless explicitly asked to repair it.
 
-### 4. Add explicit correction without erasing history
+### 3. Add explicit correction without erasing history
 
 **Gap**
 
@@ -104,7 +81,7 @@ history, with an option to include corrections.
   effective, non-void history should be the single source of truth.
 - Do not build general event sourcing; two explicit relationships are enough.
 
-### 5. Make interval semantics deliberately narrow
+### 4. Make interval semantics deliberately narrow
 
 **Gap**
 
@@ -129,7 +106,7 @@ calendar months only after a real use case justifies separate month arithmetic.
   explicit machine-readable states.
 - Allow a clock/timezone override in tests to cover leap days and DST boundaries.
 
-### 6. Separate stable ASCII keys from human display names
+### 5. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -157,7 +134,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 7. Publish personal-OS conventions as fixtures, not a shared library
+### 6. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -182,7 +159,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 8. Support one structured reading per event
+### 7. Support one structured reading per event
 
 **Gap**
 
@@ -208,7 +185,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 9. Add batch capture through standard input
+### 8. Add batch capture through standard input
 
 **Gap**
 
