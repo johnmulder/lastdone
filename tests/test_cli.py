@@ -313,6 +313,7 @@ class CliContractTests(unittest.TestCase):
         }
         invalid_records = (
             "",
+            "[" * 2_000 + "]" * 2_000,
             json.dumps({**base, "record_version": 2}),
             json.dumps({**base, "occurred_at": "2024-02-29T00:00:00.000000Z"}),
             json.dumps({**base, "occurred_on": "2026-02-29"}),
@@ -888,6 +889,16 @@ class CliContractTests(unittest.TestCase):
                 """
             )
             database.commit()
+
+        doctor = self.run_cli("doctor", "--jsonl")
+        self.assertEqual(3, doctor.returncode)
+        self.assertEqual("", doctor.stderr)
+        report = json.loads(doctor.stdout)
+        self.assertEqual("ok", report["schema"])
+        self.assertIsInstance(report["integrity"], str)
+        self.assertNotEqual("ok", report["parseability"])
+        self.assertIsNone(report["events"])
+        self.assertEqual("problems", report["status"])
 
         result = self.run_cli("list")
         self.assertEqual(3, result.returncode)

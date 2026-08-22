@@ -522,7 +522,7 @@ def valid_import_timestamp(value: str) -> bool:
 def parse_import_record(line: str, line_number: int) -> dict[str, Any]:
     try:
         record = json.loads(line)
-    except (json.JSONDecodeError, UnicodeError):
+    except (json.JSONDecodeError, UnicodeError, RecursionError):
         raise InvalidImport(f"line {line_number}: invalid JSON") from None
 
     fields = {
