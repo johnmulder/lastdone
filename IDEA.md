@@ -334,6 +334,11 @@ SQLite offers:
 - low operational complexity;
 - room for future indexing and metadata.
 
+The schema should use `PRAGMA user_version` for numbered, forward-only
+migrations. Each migration and version update should share one transaction.
+Before a migration rebuilds a table, preserve a user-only recovery copy of the
+database.
+
 Suggested default location:
 
 ```text
@@ -350,12 +355,33 @@ The database should remain an implementation detail. The CLI is the stable inter
 
 ```sql
 CREATE TABLE events (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
+    id TEXT PRIMARY KEY
+        CONSTRAINT events_id_nonempty CHECK (length(id) > 0),
+    name TEXT NOT NULL
+        CONSTRAINT events_name_nonempty CHECK (length(name) > 0),
     occurred_at TEXT,
     occurred_on TEXT,
     note TEXT,
-    CHECK ((occurred_at IS NOT NULL) <> (occurred_on IS NOT NULL))
+    CONSTRAINT events_occurrence_exactly_one CHECK (
+        (occurred_at IS NOT NULL) <> (occurred_on IS NOT NULL)
+    ),
+    CONSTRAINT events_occurred_at_valid CHECK (
+        occurred_at IS NULL OR (
+            length(occurred_at) = 27
+            AND occurred_at GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+            AND datetime(substr(occurred_at, 1, 19), '+0 seconds') =
+                replace(substr(occurred_at, 1, 19), 'T', ' ')
+        )
+    ),
+    CONSTRAINT events_occurred_on_valid CHECK (
+        occurred_on IS NULL OR (
+            length(occurred_on) = 10
+            AND occurred_on GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+            AND date(occurred_on, '+0 days') = occurred_on
+        )
+    )
 );
 
 CREATE INDEX idx_events_name

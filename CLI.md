@@ -38,7 +38,15 @@ above are invalid; `--note`, `set`, and `due` remain outside this contract.
 
 The default database is `$XDG_DATA_HOME/last/last.db`. When `XDG_DATA_HOME` is
 unset or empty, it is `~/.local/share/last/last.db`. The parent directory and
-database are created on first use.
+database are created on first use. On POSIX systems the app directory is mode
+0700 and the database is mode 0600.
+
+The database schema uses `PRAGMA user_version`; the current schema version is 1.
+Migrations run forward in numbered transactions before the requested command.
+Before rebuilding an existing unversioned database, `lastdone` creates
+`last.db.v0.bak` with mode 0600 and never overwrites it. A newer schema version,
+an unrecognized schema, or schema drift is a storage error and returns 3 without
+mutating the database.
 
 ## JSONL records
 
@@ -143,7 +151,7 @@ Help returns 0, writes usage text to stdout, and writes nothing to stderr.
 Version returns 0 and writes exactly:
 
 ```text
-lastdone 0.2.0
+lastdone 0.3.0
 ```
 
 ## Exit codes
