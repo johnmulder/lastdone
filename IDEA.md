@@ -10,6 +10,10 @@ It records recurring real-world activities—changing filters, rotating tires, r
 
 The tool should be fast enough to use casually, simple enough to trust, and composable enough to become one part of a larger Unix-like personal operating system.
 
+## Command Name
+
+The project is named `last`, but its executable is `lastdone`. Unix systems already provide `last` for displaying login history; installing another command under that name would shadow an established administration tool. The project does not install a `last` alias or compatibility wrapper.
+
 ---
 
 ## Problem
@@ -36,13 +40,13 @@ Calendar reminders solve only part of the problem. They tell you what you *plann
 Recording an event should require almost no ceremony.
 
 ```sh
-last add furnace-filter
+lastdone add furnace-filter
 ```
 
 Querying should be equally direct.
 
 ```sh
-last show furnace-filter
+lastdone show furnace-filter
 ```
 
 Example:
@@ -99,7 +103,7 @@ The tool succeeds only if recording an event is easier than deciding not to reco
 The normal case should be:
 
 ```sh
-last add <name>
+lastdone add <name>
 ```
 
 ### 5. Composable
@@ -140,19 +144,19 @@ Those systems may consume `last` data later.
 ### Record an event
 
 ```sh
-last add furnace-filter
+lastdone add furnace-filter
 ```
 
 Record an event with an explicit date:
 
 ```sh
-last add furnace-filter --date 2026-08-20
+lastdone add furnace-filter --date 2026-08-20
 ```
 
 Optional note:
 
 ```sh
-last add furnace-filter --note "MERV 11"
+lastdone add furnace-filter --note "MERV 11"
 ```
 
 ---
@@ -160,7 +164,7 @@ last add furnace-filter --note "MERV 11"
 ### Show history summary
 
 ```sh
-last show furnace-filter
+lastdone show furnace-filter
 ```
 
 Possible output:
@@ -178,7 +182,7 @@ Occurrences: 5
 ### Show full history
 
 ```sh
-last history furnace-filter
+lastdone history furnace-filter
 ```
 
 Example:
@@ -195,7 +199,7 @@ Example:
 ### List known activities
 
 ```sh
-last list
+lastdone list
 ```
 
 Possible output:
@@ -213,7 +217,7 @@ toothbrush-head
 ### Define an expected interval
 
 ```sh
-last set furnace-filter --every 90d
+lastdone set furnace-filter --every 90d
 ```
 
 This does not create a scheduled task. It adds metadata describing how frequently the action is normally expected.
@@ -223,7 +227,7 @@ This does not create a scheduled task. It adds metadata describing how frequentl
 ### Show items becoming due
 
 ```sh
-last due
+lastdone due
 ```
 
 Example:
@@ -237,7 +241,7 @@ smoke-detector       73 / 180 days
 Possible filtering:
 
 ```sh
-last due --overdue
+lastdone due --overdue
 ```
 
 ---
@@ -247,13 +251,13 @@ last due --overdue
 Commands that return structured information should support:
 
 ```sh
-last show furnace-filter --json
+lastdone show furnace-filter --json
 ```
 
 or, preferably for the wider personal-OS convention:
 
 ```sh
-last show furnace-filter --jsonl
+lastdone show furnace-filter --jsonl
 ```
 
 Example:
@@ -396,13 +400,13 @@ Human-oriented commands may usually display local dates when exact time is unimp
 For example:
 
 ```sh
-last add furnace-filter
+lastdone add furnace-filter
 ```
 
 records the full current timestamp, while:
 
 ```sh
-last show furnace-filter
+lastdone show furnace-filter
 ```
 
 may display:
@@ -439,10 +443,10 @@ The MVP should be intentionally narrow.
 ### Required
 
 ```text
-last add NAME
-last show NAME
-last history NAME
-last list
+lastdone add NAME
+lastdone show NAME
+lastdone history NAME
+lastdone list
 ```
 
 Plus:
@@ -456,10 +460,10 @@ Plus:
 ### Nice immediately after MVP
 
 ```text
-last set NAME --every INTERVAL
-last due
-last add NAME --date DATE
-last add NAME --note TEXT
+lastdone set NAME --every INTERVAL
+lastdone due
+lastdone add NAME --date DATE
+lastdone add NAME --note TEXT
 ```
 
 ### Explicitly defer
@@ -485,30 +489,30 @@ These should be added only when actual usage demonstrates the need.
 ### Household maintenance
 
 ```sh
-last add furnace-filter
-last add coffee-machine-clean
-last add smoke-detector-test
+lastdone add furnace-filter
+lastdone add coffee-machine-clean
+lastdone add smoke-detector-test
 ```
 
 ### Vehicle maintenance
 
 ```sh
-last add jeep-oil-change --note "84,221 miles"
-last add jeep-tire-rotation
+lastdone add jeep-oil-change --note "84,221 miles"
+lastdone add jeep-tire-rotation
 ```
 
 ### Consumables
 
 ```sh
-last add toothbrush-head
-last add water-filter
+lastdone add toothbrush-head
+lastdone add water-filter
 ```
 
 ### Pet care
 
 ```sh
-last add xander-nail-trim
-last add xander-bath
+lastdone add xander-nail-trim
+lastdone add xander-bath
 ```
 
 The tool should remain agnostic about the domain.
@@ -528,7 +532,7 @@ now
 could consume:
 
 ```sh
-last due --jsonl
+lastdone due --jsonl
 ```
 
 and incorporate overdue maintenance into a broader daily summary.
@@ -542,7 +546,7 @@ where show furnace-filter
 might answer where replacement filters are stored, while:
 
 ```sh
-last show furnace-filter
+lastdone show furnace-filter
 ```
 
 answers when one was last installed.
