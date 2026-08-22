@@ -35,12 +35,16 @@ class CliContractTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def run_cli(
-        self, *arguments: str, environment: dict[str, str] | None = None
+        self,
+        *arguments: str,
+        environment: dict[str, str] | None = None,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(CLI), *arguments],
             capture_output=True,
             text=True,
+            input=input_text,
             env=environment or self.environment,
             check=False,
         )
@@ -55,13 +59,15 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.4.0\n", version.stdout)
+        self.assertEqual("lastdone 0.5.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
         self.assertEqual(0, help_result.returncode)
         self.assertIn("usage: lastdone", help_result.stdout)
         self.assertIn("--db PATH", help_result.stdout)
+        self.assertIn("export", help_result.stdout)
+        self.assertIn("import", help_result.stdout)
         self.assertEqual("", help_result.stderr)
 
     def test_invalid_input_uses_exit_two_and_stderr(self) -> None:
@@ -76,6 +82,8 @@ class CliContractTests(unittest.TestCase):
             ("add", "future", "--date", "9999-12-31"),
             ("--db", "", "list"),
             ("list", "--db", "somewhere.db"),
+            ("export",),
+            ("import",),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_cli(*arguments)
@@ -201,6 +209,132 @@ class CliContractTests(unittest.TestCase):
         )
         UUID(str(event["id"]))
         self.assertRegex(str(event["occurred_at"]), TIMESTAMP)
+
+    def test_export_import_round_trip_is_lossless_and_idempotent(self) -> None:
+        instant = self.add_json("instant")
+        dated = self.add_json("dated", "--date", "2024-02-29")
+        source_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(source_path)) as database:
+            database.execute(
+                "UPDATE events SET note = ? WHERE id = ?",
+                ("line one\nline two — café", dated["id"]),
+            )
+            database.commit()
+
+        exported = self.run_cli("export", "--jsonl")
+        self.assertEqual(0, exported.returncode, exported.stderr)
+        self.assertEqual("", exported.stderr)
+        records = [json.loads(line) for line in exported.stdout.splitlines()]
+        self.assertEqual([instant["id"], dated["id"]], [r["id"] for r in records])
+        self.assertTrue(all(record["record_version"] == 1 for record in records))
+        self.assertTrue(all("schema_version" not in record for record in records))
+        self.assertEqual("line one\nline two — café", records[1]["note"])
+
+        target_path = self.data_home / "round-trip" / "last.db"
+        target_arguments = ("--db", str(target_path))
+        imported = self.run_cli(
+            *target_arguments,
+            "import",
+            "--jsonl",
+            input_text=exported.stdout,
+        )
+        self.assertEqual(0, imported.returncode, imported.stderr)
+        self.assertEqual("", imported.stdout)
+        self.assertEqual("", imported.stderr)
+
+        target_export = self.run_cli(*target_arguments, "export", "--jsonl")
+        self.assertEqual(exported.stdout, target_export.stdout)
+        repeated = self.run_cli(
+            *target_arguments,
+            "import",
+            "--jsonl",
+            input_text=exported.stdout,
+        )
+        self.assertEqual(0, repeated.returncode, repeated.stderr)
+        self.assertEqual(
+            exported.stdout,
+            self.run_cli(*target_arguments, "export", "--jsonl").stdout,
+        )
+
+    def test_import_rolls_back_bad_lines_and_conflicting_ids(self) -> None:
+        base = {
+            "record_version": 1,
+            "type": "event",
+            "id": "original-id",
+            "name": "original",
+            "occurred_at": None,
+            "occurred_on": "2024-02-29",
+            "note": None,
+        }
+        database_path = self.data_home / "import" / "last.db"
+        arguments = ("--db", str(database_path))
+        initial_stream = json.dumps(base) + "\n"
+        initial = self.run_cli(
+            *arguments, "import", "--jsonl", input_text=initial_stream
+        )
+        self.assertEqual(0, initial.returncode, initial.stderr)
+        baseline = self.run_cli(*arguments, "export", "--jsonl").stdout
+
+        added = {**base, "id": "rolled-back-id", "name": "rolled-back"}
+        conflict = {**base, "name": "different"}
+        conflict_stream = "\n".join(
+            (json.dumps(added), json.dumps(conflict), "")
+        )
+        conflict_result = self.run_cli(
+            *arguments, "import", "--jsonl", input_text=conflict_stream
+        )
+        self.assertEqual(2, conflict_result.returncode)
+        self.assertEqual("", conflict_result.stdout)
+        self.assertIn("import error: line 2: ID conflicts", conflict_result.stderr)
+        self.assertEqual(
+            baseline, self.run_cli(*arguments, "export", "--jsonl").stdout
+        )
+
+        bad_json_stream = json.dumps(added) + "\n{not-json}\n"
+        bad_json = self.run_cli(
+            *arguments, "import", "--jsonl", input_text=bad_json_stream
+        )
+        self.assertEqual(2, bad_json.returncode)
+        self.assertIn("import error: line 2: invalid JSON", bad_json.stderr)
+        self.assertEqual(
+            baseline, self.run_cli(*arguments, "export", "--jsonl").stdout
+        )
+
+    def test_import_rejects_invalid_record_shapes(self) -> None:
+        base = {
+            "record_version": 1,
+            "type": "event",
+            "id": "event-id",
+            "name": "event",
+            "occurred_at": None,
+            "occurred_on": "2024-02-29",
+            "note": None,
+        }
+        invalid_records = (
+            "",
+            json.dumps({**base, "record_version": 2}),
+            json.dumps({**base, "occurred_at": "2024-02-29T00:00:00.000000Z"}),
+            json.dumps({**base, "occurred_on": "2026-02-29"}),
+            json.dumps({key: value for key, value in base.items() if key != "note"}),
+            json.dumps({**base, "extra": True}),
+        )
+        for index, record in enumerate(invalid_records):
+            with self.subTest(index=index):
+                database_path = self.data_home / f"invalid-{index}" / "last.db"
+                result = self.run_cli(
+                    "--db",
+                    str(database_path),
+                    "import",
+                    "--jsonl",
+                    input_text=f"{record}\n",
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertTrue(result.stderr.startswith("lastdone: import error:"))
+                exported = self.run_cli(
+                    "--db", str(database_path), "export", "--jsonl"
+                )
+                self.assertEqual("", exported.stdout)
 
     def test_run_boundary_accepts_fixed_time_and_database_path(self) -> None:
         now = datetime(

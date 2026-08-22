@@ -15,13 +15,17 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 SCHEMA_VERSION = 1
 BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class ActivityNotFound(Exception):
     """Raised when a requested activity has no events."""
+
+
+class InvalidImport(Exception):
+    """Raised when an interchange record cannot be imported."""
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -108,6 +112,14 @@ def parse_args(
     list_command = commands.add_parser("list", help="list known activities")
     list_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
     list_command.set_defaults(handler=list_activities)
+
+    export_command = commands.add_parser("export", help="export all events")
+    export_command.add_argument("--jsonl", action="store_true", required=True)
+    export_command.set_defaults(handler=export_events)
+
+    import_command = commands.add_parser("import", help="import events")
+    import_command.add_argument("--jsonl", action="store_true", required=True)
+    import_command.set_defaults(handler=import_events)
 
     return parser.parse_args(argv)
 
@@ -314,16 +326,22 @@ def current_timestamp(now: datetime) -> str:
     )
 
 
-def event_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+def event_values(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": 2,
-        "type": "event",
         "id": row["id"],
         "name": row["name"],
         "occurred_at": row["occurred_at"],
         "occurred_on": row["occurred_on"],
         "note": row["note"],
     }
+
+
+def event_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {"schema_version": 2, "type": "event", **event_values(row)}
+
+
+def interchange_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {"record_version": 1, "type": "event", **event_values(row)}
 
 
 def emit_json(record: dict[str, Any]) -> None:
@@ -458,6 +476,133 @@ def list_activities(database: sqlite3.Connection, args: argparse.Namespace) -> i
     return 0
 
 
+def export_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    rows = database.execute(
+        """
+        SELECT id, name, occurred_at, occurred_on, note
+        FROM events
+        ORDER BY rowid
+        """
+    )
+    for row in rows:
+        emit_json(interchange_record(row))
+    return 0
+
+
+def valid_import_timestamp(value: str) -> bool:
+    if len(value) != 27 or not value.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
+    except ValueError:
+        return False
+    return current_timestamp(parsed) == value
+
+
+def parse_import_record(line: str, line_number: int) -> dict[str, Any]:
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, UnicodeError):
+        raise InvalidImport(f"line {line_number}: invalid JSON") from None
+
+    fields = {
+        "record_version",
+        "type",
+        "id",
+        "name",
+        "occurred_at",
+        "occurred_on",
+        "note",
+    }
+    if not isinstance(record, dict) or set(record) != fields:
+        raise InvalidImport(f"line {line_number}: expected event record fields")
+    if type(record["record_version"]) is not int or record["record_version"] != 1:
+        raise InvalidImport(f"line {line_number}: unsupported record version")
+    if record["type"] != "event":
+        raise InvalidImport(f"line {line_number}: type must be event")
+    for field in ("id", "name"):
+        value = record[field]
+        if not isinstance(value, str) or not value:
+            raise InvalidImport(
+                f"line {line_number}: {field} must be a non-empty string"
+            )
+    if record["note"] is not None and not isinstance(record["note"], str):
+        raise InvalidImport(f"line {line_number}: note must be a string or null")
+    text_values = (record["id"], record["name"], record["note"] or "")
+    try:
+        for value in text_values:
+            value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidImport(f"line {line_number}: text must be valid UTF-8") from None
+
+    occurred_at = record["occurred_at"]
+    occurred_on = record["occurred_on"]
+    if (occurred_at is None) == (occurred_on is None):
+        raise InvalidImport(
+            f"line {line_number}: exactly one occurrence field is required"
+        )
+    if occurred_at is not None and (
+        not isinstance(occurred_at, str)
+        or not valid_import_timestamp(occurred_at)
+    ):
+        raise InvalidImport(f"line {line_number}: invalid occurred_at")
+    if occurred_on is not None:
+        if not isinstance(occurred_on, str):
+            raise InvalidImport(f"line {line_number}: invalid occurred_on")
+        try:
+            parsed_date = date.fromisoformat(occurred_on)
+        except ValueError:
+            raise InvalidImport(f"line {line_number}: invalid occurred_on") from None
+        if parsed_date.isoformat() != occurred_on:
+            raise InvalidImport(f"line {line_number}: invalid occurred_on")
+    return event_values(record)
+
+
+def import_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    line_number = 0
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        for line_number, line in enumerate(sys.stdin, 1):
+            event = parse_import_record(line, line_number)
+            existing = database.execute(
+                """
+                SELECT id, name, occurred_at, occurred_on, note
+                FROM events
+                WHERE id = ?
+                """,
+                (event["id"],),
+            ).fetchone()
+            if existing is not None:
+                if event_values(existing) != event:
+                    raise InvalidImport(
+                        f"line {line_number}: ID conflicts with existing event"
+                    )
+                continue
+            database.execute(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event["id"],
+                    event["name"],
+                    event["occurred_at"],
+                    event["occurred_on"],
+                    event["note"],
+                ),
+            )
+        database.commit()
+    except UnicodeError:
+        database.rollback()
+        raise InvalidImport(
+            f"line {line_number + 1}: input must be valid UTF-8"
+        ) from None
+    except Exception:
+        database.rollback()
+        raise
+    return 0
+
+
 def silence_broken_pipe() -> None:
     try:
         stdout = sys.stdout.fileno()
@@ -510,6 +655,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ActivityNotFound as error:
         print(f"lastdone: activity not found: {error}", file=sys.stderr)
         return 1
+    except InvalidImport as error:
+        print(f"lastdone: import error: {error}", file=sys.stderr)
+        return 2
     except (OSError, sqlite3.Error) as error:
         print(
             f"lastdone: storage error: {storage_error_message(error)}",
