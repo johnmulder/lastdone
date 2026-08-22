@@ -7,32 +7,9 @@ Unix-like goals without turning it into a task manager.
 
 ## Before the MVP
 
-### 1. Specify data-location overrides and concurrency behavior
-
-**Gap**
-
-An XDG default is suggested, but scripts, tests, removable backups, and multiple
-personal profiles need a predictable way to select a database. Concurrent shell
-invocations also need a defined failure mode.
-
-**Approach**
-
-Use one documented precedence order: a `--db PATH` option, then a project-specific
-environment variable, then the XDG data directory, then the platform fallback.
-Use short SQLite transactions and a modest busy timeout for concurrent writers.
-
-**Implementation considerations**
-
-- Resolve and print the active path in a future `doctor` command, but never add it
-  to normal machine output.
-- Do not introduce a configuration file until there is a setting that cannot be
-  expressed clearly as an option or environment variable.
-- Surface lock timeouts as storage errors with actionable diagnostics.
-- Test two near-simultaneous `add` operations to confirm neither event is lost.
-
 ## Immediately after the MVP
 
-### 2. Provide lossless export, idempotent import, and basic diagnostics
+### 1. Provide lossless export, idempotent import, and basic diagnostics
 
 **Gap**
 
@@ -56,7 +33,7 @@ stream and treat an already-present identical ID as a no-op.
 - Have `doctor` check schema version, integrity, permissions, and parseability;
   it should not mutate data unless explicitly asked to repair it.
 
-### 3. Add explicit correction without erasing history
+### 2. Add explicit correction without erasing history
 
 **Gap**
 
@@ -81,7 +58,7 @@ history, with an option to include corrections.
   effective, non-void history should be the single source of truth.
 - Do not build general event sourcing; two explicit relationships are enough.
 
-### 4. Make interval semantics deliberately narrow
+### 3. Make interval semantics deliberately narrow
 
 **Gap**
 
@@ -106,7 +83,7 @@ calendar months only after a real use case justifies separate month arithmetic.
   explicit machine-readable states.
 - Allow a clock/timezone override in tests to cover leap days and DST boundaries.
 
-### 5. Separate stable ASCII keys from human display names
+### 4. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -134,7 +111,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 6. Publish personal-OS conventions as fixtures, not a shared library
+### 5. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -159,7 +136,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 7. Support one structured reading per event
+### 6. Support one structured reading per event
 
 **Gap**
 
@@ -185,7 +162,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 8. Add batch capture through standard input
+### 7. Add batch capture through standard input
 
 **Gap**
 
