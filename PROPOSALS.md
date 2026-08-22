@@ -1,39 +1,12 @@
 # Proposals for `last`
 
-These proposals are ordered by when they are likely to pay off. The first group
-should be settled before or during the MVP; the later proposals should wait for
-usage evidence. They preserve the project's local-first, append-oriented, and
-Unix-like goals without turning it into a task manager.
-
-## Before the MVP
+These proposals are ordered by when they are likely to pay off. Later proposals
+should wait for usage evidence. They preserve the project's local-first,
+append-oriented, and Unix-like goals without turning it into a task manager.
 
 ## Immediately after the MVP
 
-### 1. Provide lossless export, idempotent import, and basic diagnostics
-
-**Gap**
-
-SQLite is easy to copy, but portability and inspectability are only partial if
-users must query implementation tables or replace a live database to move data.
-The personal-OS integration goal also needs a supported interchange format.
-
-**Approach**
-
-Add `export --jsonl`, `import --jsonl`, and `doctor`. Export every durable field,
-including event IDs and occurrence precision. Import should validate the entire
-stream and treat an already-present identical ID as a no-op.
-
-**Implementation considerations**
-
-- Stream JSONL rather than loading a whole history into memory.
-- Reject an existing ID with different content instead of overwriting it.
-- Run an import transactionally so a bad line cannot leave a partial import.
-- Keep export records independent of SQLite column names and include a small
-  record-format version.
-- Have `doctor` check schema version, integrity, permissions, and parseability;
-  it should not mutate data unless explicitly asked to repair it.
-
-### 2. Add explicit correction without erasing history
+### 1. Add explicit correction without erasing history
 
 **Gap**
 
@@ -58,7 +31,7 @@ history, with an option to include corrections.
   effective, non-void history should be the single source of truth.
 - Do not build general event sourcing; two explicit relationships are enough.
 
-### 3. Make interval semantics deliberately narrow
+### 2. Make interval semantics deliberately narrow
 
 **Gap**
 
@@ -83,7 +56,7 @@ calendar months only after a real use case justifies separate month arithmetic.
   explicit machine-readable states.
 - Allow a clock/timezone override in tests to cover leap days and DST boundaries.
 
-### 4. Separate stable ASCII keys from human display names
+### 3. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -111,7 +84,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 5. Publish personal-OS conventions as fixtures, not a shared library
+### 4. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -136,7 +109,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 6. Support one structured reading per event
+### 5. Support one structured reading per event
 
 **Gap**
 
@@ -162,7 +135,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 7. Add batch capture through standard input
+### 6. Add batch capture through standard input
 
 **Gap**
 
