@@ -14,7 +14,8 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
+SCHEMA_VERSION = 1
 
 
 class ActivityNotFound(Exception):
@@ -87,28 +88,63 @@ def create_events_table(database: sqlite3.Connection) -> None:
     database.execute(
         """
         CREATE TABLE events (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
+            id TEXT NOT NULL PRIMARY KEY
+                CONSTRAINT events_id_nonempty CHECK (length(id) > 0),
+            name TEXT NOT NULL
+                CONSTRAINT events_name_nonempty CHECK (length(name) > 0),
             occurred_at TEXT,
             occurred_on TEXT,
             note TEXT,
-            CHECK ((occurred_at IS NOT NULL) <> (occurred_on IS NOT NULL))
+            CONSTRAINT events_occurrence_exactly_one CHECK (
+                (occurred_at IS NOT NULL) <> (occurred_on IS NOT NULL)
+            ),
+            CONSTRAINT events_occurred_at_valid CHECK (
+                occurred_at IS NULL OR (
+                    length(occurred_at) = 27
+                    AND occurred_at GLOB (
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T' ||
+                        '[0-9][0-9]:[0-9][0-9]:[0-9][0-9].' ||
+                        '[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+                    )
+                    AND coalesce(
+                        datetime(substr(occurred_at, 1, 19), '+0 seconds') =
+                            replace(substr(occurred_at, 1, 19), 'T', ' '),
+                        0
+                    )
+                )
+            ),
+            CONSTRAINT events_occurred_on_valid CHECK (
+                occurred_on IS NULL OR (
+                    length(occurred_on) = 10
+                    AND occurred_on GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                    AND coalesce(
+                        date(occurred_on, '+0 days') = occurred_on,
+                        0
+                    )
+                )
+            )
         )
         """
     )
 
 
-def initialize_schema(database: sqlite3.Connection) -> None:
-    columns = {
-        row["name"] for row in database.execute("PRAGMA table_info(events)")
-    }
+def table_columns(database: sqlite3.Connection) -> tuple[str, ...]:
+    return tuple(row["name"] for row in database.execute("PRAGMA table_info(events)"))
+
+
+def migrate_to_version_1(database: sqlite3.Connection) -> None:
+    columns = table_columns(database)
     if not columns:
         create_events_table(database)
-    elif "occurred_on" not in columns:
-        database.execute("BEGIN")
-        try:
-            database.execute("ALTER TABLE events RENAME TO events_legacy")
-            create_events_table(database)
+    else:
+        legacy_columns = ("id", "name", "occurred_at", "note")
+        precision_columns = ("id", "name", "occurred_at", "occurred_on", "note")
+        if columns not in (legacy_columns, precision_columns):
+            raise sqlite3.DatabaseError("unrecognized unversioned events schema")
+        database.execute("ALTER TABLE events RENAME TO events_legacy")
+        create_events_table(database)
+        if columns == legacy_columns:
             database.execute(
                 """
                 INSERT INTO events (id, name, occurred_at, occurred_on, note)
@@ -116,24 +152,109 @@ def initialize_schema(database: sqlite3.Connection) -> None:
                 FROM events_legacy
                 """
             )
-            database.execute("DROP TABLE events_legacy")
+        else:
+            database.execute(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                SELECT id, name, occurred_at, occurred_on, note
+                FROM events_legacy
+                """
+            )
+        database.execute("DROP TABLE events_legacy")
+    database.execute("CREATE INDEX idx_events_name ON events(name)")
+
+
+MIGRATIONS = (migrate_to_version_1,)
+
+
+def database_schema_version(database: sqlite3.Connection) -> int:
+    return database.execute("PRAGMA user_version").fetchone()[0]
+
+
+def backup_before_migration(database: sqlite3.Connection, path: Path) -> None:
+    if not table_columns(database):
+        return
+    backup_path = path.with_name(f"{path.name}.v0.bak")
+    if backup_path.exists():
+        return
+    backup = sqlite3.connect(backup_path)
+    try:
+        database.backup(backup)
+    except Exception:
+        backup.close()
+        try:
+            backup_path.unlink()
+        except OSError:
+            pass
+        raise
+    backup.close()
+    if os.name == "posix":
+        os.chmod(backup_path, 0o600)
+
+
+def validate_schema(database: sqlite3.Connection) -> None:
+    expected_columns = ("id", "name", "occurred_at", "occurred_on", "note")
+    if table_columns(database) != expected_columns:
+        raise sqlite3.DatabaseError("database schema does not match its version")
+    table_sql_row = database.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'"
+    ).fetchone()
+    table_sql = table_sql_row["sql"] if table_sql_row else ""
+    markers = (
+        "events_id_nonempty",
+        "events_name_nonempty",
+        "events_occurrence_exactly_one",
+        "events_occurred_at_valid",
+        "events_occurred_on_valid",
+    )
+    if any(marker not in table_sql for marker in markers):
+        raise sqlite3.DatabaseError("database schema does not match its version")
+    indexes = {
+        row["name"] for row in database.execute("PRAGMA index_list(events)")
+    }
+    if "idx_events_name" not in indexes:
+        raise sqlite3.DatabaseError("database schema does not match its version")
+    integrity = database.execute("PRAGMA integrity_check(1)").fetchone()[0]
+    if integrity != "ok":
+        raise sqlite3.DatabaseError(f"database integrity check failed: {integrity}")
+
+
+def apply_migrations(database: sqlite3.Connection, path: Path) -> None:
+    version = database_schema_version(database)
+    if version > SCHEMA_VERSION:
+        raise sqlite3.DatabaseError(
+            f"database schema version {version} is newer than supported version "
+            f"{SCHEMA_VERSION}"
+        )
+    if version == 0:
+        backup_before_migration(database, path)
+    for target_version in range(version + 1, SCHEMA_VERSION + 1):
+        database.execute("BEGIN IMMEDIATE")
+        try:
+            MIGRATIONS[target_version - 1](database)
+            database.execute(f"PRAGMA user_version = {target_version}")
             database.commit()
         except Exception:
             database.rollback()
             raise
-    database.execute(
-        "CREATE INDEX IF NOT EXISTS idx_events_name ON events(name)"
-    )
-    database.commit()
+    validate_schema(database)
+
+
+def prepare_storage(path: Path) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(path.parent, 0o700)
 
 
 def connect_database() -> sqlite3.Connection:
     path = database_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    prepare_storage(path)
     database = sqlite3.connect(path)
     database.row_factory = sqlite3.Row
     try:
-        initialize_schema(database)
+        apply_migrations(database, path)
+        if os.name == "posix":
+            os.chmod(path, 0o600)
     except Exception:
         database.close()
         raise

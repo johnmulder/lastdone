@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -49,7 +50,7 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.2.0\n", version.stdout)
+        self.assertEqual("lastdone 0.3.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
@@ -91,6 +92,28 @@ class CliContractTests(unittest.TestCase):
                 self.assertEqual(
                     "lastdone: activity not found: missing\n", result.stderr
                 )
+
+    def test_fresh_database_is_versioned_private_and_idempotent(self) -> None:
+        first = self.run_cli("list")
+        self.assertEqual(0, first.returncode, first.stderr)
+        database_path = self.data_home / "last" / "last.db"
+        self.assertTrue(database_path.is_file())
+        self.assertFalse(database_path.with_name("last.db.v0.bak").exists())
+        if os.name == "posix":
+            self.assertEqual(0o700, stat.S_IMODE(database_path.parent.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(database_path.stat().st_mode))
+
+        with closing(sqlite3.connect(database_path)) as database:
+            version = database.execute("PRAGMA user_version").fetchone()[0]
+            table_sql = database.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'events'"
+            ).fetchone()[0]
+        self.assertEqual(1, version)
+        self.assertIn("events_occurred_at_valid", table_sql)
+
+        second = self.run_cli("list")
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertFalse(database_path.with_name("last.db.v0.bak").exists())
 
     def test_add_is_silent_and_jsonl_add_is_an_event(self) -> None:
         silent = self.run_cli("add", "furnace-filter")
@@ -278,26 +301,33 @@ class CliContractTests(unittest.TestCase):
         human = self.run_cli("show", "dst", environment=denver)
         self.assertIn("\nLast: 2026-03-09\nPrevious: 2026-03-08\nInterval: 1 days\n", human.stdout)
 
-    def test_schema_requires_exactly_one_occurrence_value(self) -> None:
+    def test_schema_rejects_invalid_events(self) -> None:
         self.assertEqual(0, self.run_cli("list").returncode)
         database_path = self.data_home / "last" / "last.db"
+        valid_instant = "2026-01-01T00:00:00.000000Z"
+        invalid_events = (
+            (None, "name", valid_instant, None, None),
+            ("", "name", valid_instant, None, None),
+            ("empty-name", "", valid_instant, None, None),
+            ("neither", "name", None, None, None),
+            ("both", "name", valid_instant, "2026-01-01", None),
+            ("short-time", "name", "2026-01-01T00:00:00Z", None, None),
+            ("bad-time", "name", "2026-01-01T25:00:00.000000Z", None, None),
+            ("bad-date", "name", None, "2026-02-29", None),
+        )
         with closing(sqlite3.connect(database_path)) as database:
-            with self.assertRaises(sqlite3.IntegrityError):
-                database.execute(
-                    """
-                    INSERT INTO events (id, name, occurred_at, occurred_on, note)
-                    VALUES ('neither', 'invalid', NULL, NULL, NULL)
-                    """
-                )
-            database.rollback()
-            with self.assertRaises(sqlite3.IntegrityError):
-                database.execute(
-                    """
-                    INSERT INTO events (id, name, occurred_at, occurred_on, note)
-                    VALUES ('both', 'invalid', '2026-01-01T00:00:00.000000Z',
-                            '2026-01-01', NULL)
-                    """
-                )
+            for event in invalid_events:
+                with self.subTest(event=event):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        database.execute(
+                            """
+                            INSERT INTO events
+                                (id, name, occurred_at, occurred_on, note)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            event,
+                        )
+                    database.rollback()
 
     def test_legacy_database_migrates_without_changing_instant(self) -> None:
         database_path = self.data_home / "last" / "last.db"
@@ -335,7 +365,32 @@ class CliContractTests(unittest.TestCase):
             json.loads(result.stdout),
         )
 
+        backup_path = database_path.with_name("last.db.v0.bak")
+        self.assertTrue(backup_path.is_file())
+        if os.name == "posix":
+            self.assertEqual(0o600, stat.S_IMODE(backup_path.stat().st_mode))
+        with closing(sqlite3.connect(backup_path)) as backup:
+            backup_version = backup.execute("PRAGMA user_version").fetchone()[0]
+            backup_columns = {
+                row[1] for row in backup.execute("PRAGMA table_info(events)")
+            }
+            backup_row = backup.execute(
+                "SELECT id, name, occurred_at, note FROM events"
+            ).fetchone()
+        self.assertEqual(0, backup_version)
+        self.assertNotIn("occurred_on", backup_columns)
+        self.assertEqual(
+            (
+                "legacy-id",
+                "legacy",
+                "2026-08-21T20:32:00.000000Z",
+                "preserved",
+            ),
+            backup_row,
+        )
+
         with closing(sqlite3.connect(database_path)) as database:
+            version = database.execute("PRAGMA user_version").fetchone()[0]
             columns = {
                 row[1] for row in database.execute("PRAGMA table_info(events)")
             }
@@ -345,10 +400,169 @@ class CliContractTests(unittest.TestCase):
             table_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'events'"
             ).fetchone()[0]
+        self.assertEqual(1, version)
         self.assertIn("occurred_on", columns)
         self.assertIn("idx_events_name", indexes)
         self.assertNotIn("idx_events_name_occurred_at", indexes)
-        self.assertIn("CHECK", table_sql)
+        self.assertIn("events_occurred_on_valid", table_sql)
+
+    def test_unversioned_precision_database_migrates_date_event(self) -> None:
+        database_path = self.data_home / "last" / "last.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.executescript(
+                """
+                CREATE TABLE events (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    occurred_at TEXT,
+                    occurred_on TEXT,
+                    note TEXT,
+                    CHECK ((occurred_at IS NOT NULL) <>
+                           (occurred_on IS NOT NULL))
+                );
+                CREATE INDEX idx_events_name ON events(name);
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES ('date-id', 'date-event', NULL, '2024-02-29', NULL);
+                """
+            )
+            database.commit()
+
+        result = self.run_cli("history", "date-event", "--jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        record = json.loads(result.stdout)
+        self.assertIsNone(record["occurred_at"])
+        self.assertEqual("2024-02-29", record["occurred_on"])
+        self.assertTrue(database_path.with_name("last.db.v0.bak").is_file())
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(
+                1, database.execute("PRAGMA user_version").fetchone()[0]
+            )
+
+    def test_invalid_legacy_data_rolls_back_and_keeps_backup(self) -> None:
+        database_path = self.data_home / "last" / "last.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.executescript(
+                """
+                CREATE TABLE events (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    occurred_at TEXT,
+                    occurred_on TEXT,
+                    note TEXT,
+                    CHECK ((occurred_at IS NOT NULL) <>
+                           (occurred_on IS NOT NULL))
+                );
+                CREATE INDEX idx_events_name ON events(name);
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES ('bad-date', 'invalid', NULL, '2026-02-29', NULL);
+                """
+            )
+            database.commit()
+
+        result = self.run_cli("list")
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("lastdone: storage error:"))
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue(database_path.with_name("last.db.v0.bak").is_file())
+
+        with closing(sqlite3.connect(database_path)) as database:
+            version = database.execute("PRAGMA user_version").fetchone()[0]
+            columns = {
+                row[1] for row in database.execute("PRAGMA table_info(events)")
+            }
+            names = {
+                row[0]
+                for row in database.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            stored_date = database.execute(
+                "SELECT occurred_on FROM events WHERE id = 'bad-date'"
+            ).fetchone()[0]
+        self.assertEqual(0, version)
+        self.assertIn("occurred_on", columns)
+        self.assertNotIn("events_legacy", names)
+        self.assertEqual("2026-02-29", stored_date)
+
+    def test_unrecognized_unversioned_schema_is_preserved(self) -> None:
+        database_path = self.data_home / "last" / "last.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                "CREATE TABLE events (id TEXT PRIMARY KEY, unexpected TEXT)"
+            )
+            database.execute(
+                "INSERT INTO events (id, unexpected) VALUES ('kept', 'value')"
+            )
+            database.commit()
+
+        result = self.run_cli("list")
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("unrecognized unversioned events schema", result.stderr)
+        self.assertTrue(database_path.with_name("last.db.v0.bak").is_file())
+        with closing(sqlite3.connect(database_path)) as database:
+            row = database.execute("SELECT id, unexpected FROM events").fetchone()
+            version = database.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(("kept", "value"), row)
+        self.assertEqual(0, version)
+
+    def test_newer_schema_version_is_rejected_without_downgrade(self) -> None:
+        self.assertEqual(0, self.run_cli("add", "preserved").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute("PRAGMA user_version = 99")
+            database.commit()
+
+        result = self.run_cli("list")
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("newer than supported", result.stderr)
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(
+                99, database.execute("PRAGMA user_version").fetchone()[0]
+            )
+            self.assertEqual(
+                1, database.execute("SELECT count(*) FROM events").fetchone()[0]
+            )
+
+    def test_declared_schema_drift_is_rejected(self) -> None:
+        self.assertEqual(0, self.run_cli("list").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute("DROP INDEX idx_events_name")
+            database.commit()
+
+        result = self.run_cli("list")
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("schema does not match its version", result.stderr)
+        with closing(sqlite3.connect(database_path)) as database:
+            indexes = {
+                row[1] for row in database.execute("PRAGMA index_list(events)")
+            }
+        self.assertNotIn("idx_events_name", indexes)
+
+    def test_integrity_check_rejects_bypassed_constraint(self) -> None:
+        self.assertEqual(0, self.run_cli("list").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute("PRAGMA ignore_check_constraints = ON")
+            database.execute(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES ('bypassed', 'invalid', NULL, '2026-02-29', NULL)
+                """
+            )
+            database.commit()
+
+        result = self.run_cli("list")
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("integrity check failed", result.stderr)
 
     def test_list_is_distinct_and_ordered_by_utf8_bytes(self) -> None:
         names = ["zeta", "alpha", "Alpha", "éclair", "alpha"]

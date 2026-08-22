@@ -355,7 +355,7 @@ The database should remain an implementation detail. The CLI is the stable inter
 
 ```sql
 CREATE TABLE events (
-    id TEXT PRIMARY KEY
+    id TEXT NOT NULL PRIMARY KEY
         CONSTRAINT events_id_nonempty CHECK (length(id) > 0),
     name TEXT NOT NULL
         CONSTRAINT events_name_nonempty CHECK (length(name) > 0),
@@ -368,10 +368,16 @@ CREATE TABLE events (
     CONSTRAINT events_occurred_at_valid CHECK (
         occurred_at IS NULL OR (
             length(occurred_at) = 27
-            AND occurred_at GLOB
-                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
-            AND datetime(substr(occurred_at, 1, 19), '+0 seconds') =
-                replace(substr(occurred_at, 1, 19), 'T', ' ')
+            AND occurred_at GLOB (
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T' ||
+                '[0-9][0-9]:[0-9][0-9]:[0-9][0-9].' ||
+                '[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+            )
+            AND coalesce(
+                datetime(substr(occurred_at, 1, 19), '+0 seconds') =
+                    replace(substr(occurred_at, 1, 19), 'T', ' '),
+                0
+            )
         )
     ),
     CONSTRAINT events_occurred_on_valid CHECK (
@@ -379,7 +385,10 @@ CREATE TABLE events (
             length(occurred_on) = 10
             AND occurred_on GLOB
                 '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
-            AND date(occurred_on, '+0 days') = occurred_on
+            AND coalesce(
+                date(occurred_on, '+0 days') = occurred_on,
+                0
+            )
         )
     )
 );
@@ -389,7 +398,10 @@ ON events(name);
 
 CREATE TABLE activities (
     name TEXT PRIMARY KEY,
-    expected_interval_seconds INTEGER,
+    expected_interval_seconds INTEGER
+        CONSTRAINT activities_interval_positive CHECK (
+            expected_interval_seconds IS NULL OR expected_interval_seconds > 0
+        ),
     description TEXT
 );
 ```
