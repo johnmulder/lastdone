@@ -492,6 +492,19 @@ Structured output should represent those states explicitly.
 
 The MVP should be intentionally narrow.
 
+### Implementation shape
+
+The first implementation is one executable built entirely from Python's
+standard library. CLI parsing, SQLite operations, and output formatting remain
+plain functions; they should become separate modules only when independent use
+or testing makes that simpler than the single file.
+
+Contract tests invoke the executable against temporary databases. The `run()`
+boundary also accepts the current time and database path directly so focused
+time tests can be deterministic without a dependency-injection framework. A
+formatter, linter, command framework, ORM, repository layer, and plugin system
+remain deferred until recurring maintenance work demonstrates a need.
+
 ### Required
 
 ```text
