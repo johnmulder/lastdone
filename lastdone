@@ -21,14 +21,19 @@ class ActivityNotFound(Exception):
     """Raised when a requested activity has no events."""
 
 
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        self.exit(2, f"lastdone: error: {message}\n")
+
+
 def activity_name(value: str) -> str:
-    if not value:
-        raise argparse.ArgumentTypeError("NAME must not be empty")
+    if not value or not value.isprintable():
+        raise argparse.ArgumentTypeError("NAME must be non-empty printable text")
     return value
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    parser = ArgumentParser(
         prog="lastdone",
         description="Record and query recurring real-world activities.",
     )

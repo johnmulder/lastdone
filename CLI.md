@@ -16,8 +16,9 @@ lastdone --help
 lastdone --version
 ```
 
-`NAME` is one non-empty command argument. Version 1 does not otherwise normalize
-or restrict names. The activity-key proposal will define a stricter grammar.
+`NAME` is one non-empty, printable command argument. Version 1 does not otherwise
+normalize or restrict names. The activity-key proposal will define a stricter
+grammar.
 
 Options not shown above are invalid. In particular, version 1 has no supported
 way to supply an occurrence time, future or otherwise. `--date`, `--note`,
