@@ -7,31 +7,7 @@ Unix-like goals without turning it into a task manager.
 
 ## Before the MVP
 
-### 1. Distinguish an instant from a calendar date
-
-**Gap**
-
-The proposed model stores a timezone-aware timestamp, while `--date 2026-08-20`
-supplies only a local calendar date. Turning that date into midnight invents a
-time and can move the event to another date when viewed in another timezone.
-
-**Approach**
-
-Represent occurrence precision explicitly. A normal `add` records an RFC 3339
-instant; `add --date` records a date-only value. Human summaries can display a
-local date for both, while machine output preserves which kind was supplied.
-
-**Implementation considerations**
-
-- Use separate `occurred_at` and `occurred_on` columns with a database check that
-  exactly one is set, or an equally explicit representation.
-- Record instants in UTC and retain the original offset only if a demonstrated
-  display need requires it.
-- Define how mixed date-only and timestamp events sort on the same day.
-- Calculate day-based intervals from calendar dates, not elapsed 24-hour blocks,
-  so daylight-saving transitions do not create surprising results.
-
-### 2. Add schema constraints and tiny, forward-only migrations
+### 1. Add schema constraints and tiny, forward-only migrations
 
 **Gap**
 
@@ -56,7 +32,7 @@ inside a transaction before executing the requested command.
 - Back up before a destructive migration; avoid an ORM or migration dependency
   for a schema this small.
 
-### 3. Keep the first implementation standard-library sized
+### 2. Keep the first implementation standard-library sized
 
 **Gap**
 
@@ -79,7 +55,7 @@ formatting that genuinely need independent tests.
   deterministic without a general dependency-injection system.
 - Add a formatter and linter only if they remove recurring review work.
 
-### 4. Specify data-location overrides and concurrency behavior
+### 3. Specify data-location overrides and concurrency behavior
 
 **Gap**
 
@@ -104,7 +80,7 @@ Use short SQLite transactions and a modest busy timeout for concurrent writers.
 
 ## Immediately after the MVP
 
-### 5. Provide lossless export, idempotent import, and basic diagnostics
+### 4. Provide lossless export, idempotent import, and basic diagnostics
 
 **Gap**
 
@@ -128,7 +104,7 @@ stream and treat an already-present identical ID as a no-op.
 - Have `doctor` check schema version, integrity, permissions, and parseability;
   it should not mutate data unless explicitly asked to repair it.
 
-### 6. Add explicit correction without erasing history
+### 5. Add explicit correction without erasing history
 
 **Gap**
 
@@ -153,7 +129,7 @@ history, with an option to include corrections.
   effective, non-void history should be the single source of truth.
 - Do not build general event sourcing; two explicit relationships are enough.
 
-### 7. Make interval semantics deliberately narrow
+### 6. Make interval semantics deliberately narrow
 
 **Gap**
 
@@ -178,7 +154,7 @@ calendar months only after a real use case justifies separate month arithmetic.
   explicit machine-readable states.
 - Allow a clock/timezone override in tests to cover leap days and DST boundaries.
 
-### 8. Separate stable ASCII keys from human display names
+### 7. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -206,7 +182,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 9. Publish personal-OS conventions as fixtures, not a shared library
+### 8. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -231,7 +207,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 10. Support one structured reading per event
+### 9. Support one structured reading per event
 
 **Gap**
 
@@ -257,7 +233,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 11. Add batch capture through standard input
+### 10. Add batch capture through standard input
 
 **Gap**
 
