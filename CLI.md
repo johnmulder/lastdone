@@ -12,6 +12,9 @@ lastdone [--db PATH] add NAME [--date YYYY-MM-DD] [--jsonl]
 lastdone [--db PATH] show NAME [--jsonl]
 lastdone [--db PATH] history NAME [--jsonl]
 lastdone [--db PATH] list [--jsonl]
+lastdone [--db PATH] export --jsonl
+lastdone [--db PATH] import --jsonl
+lastdone [--db PATH] doctor [--jsonl]
 lastdone --help
 lastdone --version
 ```
@@ -37,6 +40,9 @@ invalid; `--note`, `set`, and `due` remain outside this contract.
 - A closed stdout pipe is a successful early consumer exit: return 0 and do not
   print a traceback or diagnostic.
 
+An unhealthy `doctor` report is the sole exception to failed commands producing
+no stdout: it emits the completed report and returns 3.
+
 The database path is selected in this order:
 
 1. `--db PATH`;
@@ -45,8 +51,9 @@ The database path is selected in this order:
 4. `~/.local/share/last/last.db`.
 
 Tildes are expanded. Relative paths are resolved by SQLite from the process's
-working directory. The selected path is never added to normal human or JSONL
-output. Missing parent directories and the database are created on first use.
+working directory. The selected path is never added to ordinary command output;
+`doctor` reports it explicitly. Missing parent directories and the database are
+created on first use.
 On POSIX systems a newly created leaf directory is mode 0700 and the database is
 mode 0600; an existing custom directory keeps its permissions.
 
@@ -71,7 +78,7 @@ Every record contains:
 {"schema_version":2,"type":"..."}
 ```
 
-Version 2 has three record types.
+Version 2 has four record types.
 
 ### Event
 
@@ -107,8 +114,34 @@ Produced once per distinct name by `list --jsonl`:
 {"schema_version":2,"type":"activity","name":"furnace-filter"}
 ```
 
+### Doctor
+
+Produced once by `doctor --jsonl`:
+
+```json
+{"schema_version":2,"type":"doctor","database":"/home/me/.local/share/last/last.db","database_schema_version":1,"schema":"ok","integrity":"ok","permissions":"ok","parseability":"ok","events":5,"status":"ok"}
+```
+
+`status` is `ok` only when every applicable check passes. On non-POSIX systems,
+`permissions` is `not-applicable`. `events` is null when the events cannot be
+read safely.
+
 Adding a field is backward-compatible. Removing a field, renaming a field, or
 changing a field's meaning requires a new `schema_version`.
+
+## Interchange records
+
+`export --jsonl` and `import --jsonl` use a separate, lossless record format:
+
+```json
+{"record_version":1,"type":"event","id":"550e8400-e29b-41d4-a716-446655440000","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null,"note":null}
+```
+
+Version 1 requires exactly those seven fields. `id` and `name` are non-empty
+strings; `note` is a string or null. Exactly one occurrence field is populated.
+An exact timestamp has six fractional digits and `Z`; a calendar date is a real
+date in `YYYY-MM-DD` form. Interchange versions are independent of command-result
+`schema_version` values and SQLite column or schema versions.
 
 ## Commands
 
@@ -160,13 +193,40 @@ events never duplicate a list entry.
 
 An empty database is successful and emits no output in either mode.
 
+### `export`
+
+`export --jsonl` writes one interchange event record per line, oldest insertion
+first. It streams directly from SQLite and includes every durable event field.
+An empty database emits no output successfully.
+
+### `import`
+
+`import --jsonl` reads interchange event records from standard input and is
+silent on success. It validates and applies the stream in one transaction
+without loading it into memory. An existing identical ID is a no-op. An ID with
+different content, malformed JSON, blank line, unsupported record version, or
+invalid field rolls back the entire import and returns 2 with a diagnostic that
+begins `lastdone: import error: line N:`.
+
+### `doctor`
+
+`doctor` opens the selected database read-only and never creates, migrates, or
+repairs it. It reports the absolute database path, schema version and structure,
+SQLite integrity, database-file permissions, event parseability, event count,
+and overall status. Human output uses one labeled line per value; `--jsonl`
+emits the doctor record above.
+
+A healthy report returns 0. A completed report with problems returns 3. A
+missing or inaccessible database is a storage error, returns 3, emits no report,
+and leaves the path absent.
+
 ### `--help` and `--version`
 
 Help returns 0, writes usage text to stdout, and writes nothing to stderr.
 Version returns 0 and writes exactly:
 
 ```text
-lastdone 0.4.0
+lastdone 0.5.0
 ```
 
 ## Exit codes
@@ -175,7 +235,7 @@ lastdone 0.4.0
 | ---: | --- |
 | 0 | Success, including an empty list or closed output pipe |
 | 1 | Named activity not found |
-| 2 | Invalid command, option, name, or argument count |
+| 2 | Invalid command, option, name, argument count, or import stream |
 | 3 | Storage or configuration failure |
 
 Exit codes do not encode ordinary data states.

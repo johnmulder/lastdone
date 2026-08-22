@@ -353,9 +353,16 @@ needed for one setting.
 Connections should wait a bounded five seconds for a concurrent writer. Keep
 write transactions short, choose migrations only after acquiring the write
 lock, and report an expired lock wait as a storage error that advises retrying.
-Normal output must not reveal the selected path.
+Ordinary activity and query output must not reveal the selected path.
 
 The database should remain an implementation detail. The CLI is the stable interface.
+
+Portability should use a versioned JSONL event format rather than expose table
+or column names. Export in insertion order and import within one transaction;
+re-importing an identical event ID is harmless, while conflicting content is an
+error. A read-only `doctor` command should report the selected path, schema,
+integrity, permissions, and event parseability without creating or migrating a
+database.
 
 ---
 
