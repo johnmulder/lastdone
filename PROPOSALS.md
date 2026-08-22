@@ -7,32 +7,7 @@ Unix-like goals without turning it into a task manager.
 
 ## Before the MVP
 
-### 1. Add schema constraints and tiny, forward-only migrations
-
-**Gap**
-
-SQLite makes storage simple, but the suggested schema accepts malformed names,
-invalid temporal values, and silent schema drift. A local database that opens
-successfully can still contain data the CLI cannot interpret.
-
-**Approach**
-
-Let SQLite enforce the small invariants the application depends on, and use
-`PRAGMA user_version` for numbered, forward-only migrations. Run each migration
-inside a transaction before executing the requested command.
-
-**Implementation considerations**
-
-- Reject empty names, impossible occurrence representations, and invalid
-  interval values at both the CLI boundary and database boundary.
-- Create the database and parent directory with user-only permissions where the
-  platform permits it.
-- Generate event IDs with a standard-library UUID unless sortable IDs become a
-  measured requirement.
-- Back up before a destructive migration; avoid an ORM or migration dependency
-  for a schema this small.
-
-### 2. Keep the first implementation standard-library sized
+### 1. Keep the first implementation standard-library sized
 
 **Gap**
 
@@ -55,7 +30,7 @@ formatting that genuinely need independent tests.
   deterministic without a general dependency-injection system.
 - Add a formatter and linter only if they remove recurring review work.
 
-### 3. Specify data-location overrides and concurrency behavior
+### 2. Specify data-location overrides and concurrency behavior
 
 **Gap**
 
@@ -80,7 +55,7 @@ Use short SQLite transactions and a modest busy timeout for concurrent writers.
 
 ## Immediately after the MVP
 
-### 4. Provide lossless export, idempotent import, and basic diagnostics
+### 3. Provide lossless export, idempotent import, and basic diagnostics
 
 **Gap**
 
@@ -104,7 +79,7 @@ stream and treat an already-present identical ID as a no-op.
 - Have `doctor` check schema version, integrity, permissions, and parseability;
   it should not mutate data unless explicitly asked to repair it.
 
-### 5. Add explicit correction without erasing history
+### 4. Add explicit correction without erasing history
 
 **Gap**
 
@@ -129,7 +104,7 @@ history, with an option to include corrections.
   effective, non-void history should be the single source of truth.
 - Do not build general event sourcing; two explicit relationships are enough.
 
-### 6. Make interval semantics deliberately narrow
+### 5. Make interval semantics deliberately narrow
 
 **Gap**
 
@@ -154,7 +129,7 @@ calendar months only after a real use case justifies separate month arithmetic.
   explicit machine-readable states.
 - Allow a clock/timezone override in tests to cover leap days and DST boundaries.
 
-### 7. Separate stable ASCII keys from human display names
+### 6. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -182,7 +157,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 8. Publish personal-OS conventions as fixtures, not a shared library
+### 7. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -207,7 +182,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 9. Support one structured reading per event
+### 8. Support one structured reading per event
 
 **Gap**
 
@@ -233,7 +208,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 10. Add batch capture through standard input
+### 9. Add batch capture through standard input
 
 **Gap**
 
