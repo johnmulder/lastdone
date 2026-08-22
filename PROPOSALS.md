@@ -7,30 +7,7 @@ Unix-like goals without turning it into a task manager.
 
 ## Before the MVP
 
-### 1. Resolve the executable-name collision
-
-**Gap**
-
-`last` is already a common Unix command for displaying login history. Installing
-a new executable with the same name would shadow a system administration tool,
-make documentation ambiguous, and weaken the project's claim to compose safely
-with a normal shell environment.
-
-**Approach**
-
-Keep `last` as the project concept if desired, but ship an unambiguous executable
-such as `lastdone` or `whenlast`. Check the intended macOS, Linux, and BSD targets
-before choosing the final name. A `last` shell alias can remain an explicit user
-choice rather than an installed default.
-
-**Implementation considerations**
-
-- The package, repository, and executable do not need the same name.
-- Update every command example once, before users or scripts depend on it.
-- Do not add a runtime dispatcher or wrapper solely to preserve the conflicted
-  name.
-
-### 2. Turn the proposed CLI into a behavioral contract
+### 1. Turn the proposed CLI into a behavioral contract
 
 **Gap**
 
@@ -56,7 +33,7 @@ semantics should be versioned deliberately.
 - Treat an empty list as successful and a missing named activity as exit code 1.
 - Handle a closed downstream pipe without printing a traceback.
 
-### 3. Distinguish an instant from a calendar date
+### 2. Distinguish an instant from a calendar date
 
 **Gap**
 
@@ -80,7 +57,7 @@ local date for both, while machine output preserves which kind was supplied.
 - Calculate day-based intervals from calendar dates, not elapsed 24-hour blocks,
   so daylight-saving transitions do not create surprising results.
 
-### 4. Add schema constraints and tiny, forward-only migrations
+### 3. Add schema constraints and tiny, forward-only migrations
 
 **Gap**
 
@@ -105,7 +82,7 @@ inside a transaction before executing the requested command.
 - Back up before a destructive migration; avoid an ORM or migration dependency
   for a schema this small.
 
-### 5. Keep the first implementation standard-library sized
+### 4. Keep the first implementation standard-library sized
 
 **Gap**
 
@@ -128,7 +105,7 @@ formatting that genuinely need independent tests.
   deterministic without a general dependency-injection system.
 - Add a formatter and linter only if they remove recurring review work.
 
-### 6. Specify data-location overrides and concurrency behavior
+### 5. Specify data-location overrides and concurrency behavior
 
 **Gap**
 
@@ -153,7 +130,7 @@ Use short SQLite transactions and a modest busy timeout for concurrent writers.
 
 ## Immediately after the MVP
 
-### 7. Provide lossless export, idempotent import, and basic diagnostics
+### 6. Provide lossless export, idempotent import, and basic diagnostics
 
 **Gap**
 
@@ -177,7 +154,7 @@ stream and treat an already-present identical ID as a no-op.
 - Have `doctor` check schema version, integrity, permissions, and parseability;
   it should not mutate data unless explicitly asked to repair it.
 
-### 8. Add explicit correction without erasing history
+### 7. Add explicit correction without erasing history
 
 **Gap**
 
@@ -202,7 +179,7 @@ history, with an option to include corrections.
   effective, non-void history should be the single source of truth.
 - Do not build general event sourcing; two explicit relationships are enough.
 
-### 9. Make interval semantics deliberately narrow
+### 8. Make interval semantics deliberately narrow
 
 **Gap**
 
@@ -227,7 +204,7 @@ calendar months only after a real use case justifies separate month arithmetic.
   explicit machine-readable states.
 - Allow a clock/timezone override in tests to cover leap days and DST boundaries.
 
-### 10. Separate stable ASCII keys from human display names
+### 9. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -255,7 +232,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 11. Publish personal-OS conventions as fixtures, not a shared library
+### 10. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -280,7 +257,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 12. Support one structured reading per event
+### 11. Support one structured reading per event
 
 **Gap**
 
@@ -306,7 +283,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 13. Add batch capture through standard input
+### 12. Add batch capture through standard input
 
 **Gap**
 
