@@ -1,6 +1,6 @@
 # `lastdone` MVP CLI Contract
 
-This document defines version 1 of the observable command-line interface for
+This document defines version 2 of the observable command-line interface for
 the `last` project's `lastdone` executable. It covers the MVP only. Human output
 may gain optional detail later; the JSONL record meanings change only with a
 `schema_version` change.
@@ -8,7 +8,7 @@ may gain optional detail later; the JSONL record meanings change only with a
 ## Invocation
 
 ```text
-lastdone add NAME [--jsonl]
+lastdone add NAME [--date YYYY-MM-DD] [--jsonl]
 lastdone show NAME [--jsonl]
 lastdone history NAME [--jsonl]
 lastdone list [--jsonl]
@@ -16,13 +16,13 @@ lastdone --help
 lastdone --version
 ```
 
-`NAME` is one non-empty, printable command argument. Version 1 does not otherwise
+`NAME` is one non-empty, printable command argument. Version 2 does not otherwise
 normalize or restrict names. The activity-key proposal will define a stricter
 grammar.
 
-Options not shown above are invalid. In particular, version 1 has no supported
-way to supply an occurrence time, future or otherwise. `--date`, `--note`,
-`set`, and `due` remain outside the MVP contract.
+`--date` accepts only a real ISO 8601 calendar date in `YYYY-MM-DD` form. Future
+dates are invalid because `lastdone` records completed actions. Options not shown
+above are invalid; `--note`, `set`, and `due` remain outside this contract.
 
 ## Common behavior
 
@@ -45,41 +45,43 @@ database are created on first use.
 Every record contains:
 
 ```json
-{"schema_version":1,"type":"..."}
+{"schema_version":2,"type":"..."}
 ```
 
-Version 1 has three record types.
+Version 2 has three record types.
 
 ### Event
 
 Produced by `add --jsonl` and once per occurrence by `history --jsonl`:
 
 ```json
-{"schema_version":1,"type":"event","id":"550e8400-e29b-41d4-a716-446655440000","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","note":null}
+{"schema_version":2,"type":"event","id":"550e8400-e29b-41d4-a716-446655440000","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null,"note":null}
 ```
 
 - `id` is a UUID string unique to the event.
+- Exactly one of `occurred_at` and `occurred_on` is non-null.
 - `occurred_at` is an RFC 3339 UTC instant with six fractional digits and `Z`.
-- `note` is always null in version 1 because notes are not accepted by the MVP.
+- `occurred_on` is an ISO 8601 calendar date with no implied time or timezone.
+- `note` is always null in version 2 because notes are not yet accepted.
 
 ### Summary
 
 Produced once by `show --jsonl`:
 
 ```json
-{"schema_version":1,"type":"summary","name":"furnace-filter","last":"2026-08-21T20:32:00.000000Z","previous":"2026-05-14T15:10:00.000000Z","interval_days":99,"occurrences":5}
+{"schema_version":2,"type":"summary","name":"furnace-filter","last":{"occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null},"previous":{"occurred_at":null,"occurred_on":"2026-05-14"},"interval_days":99,"occurrences":5}
 ```
 
-`previous` and `interval_days` are null when only one event exists. The interval
-is the difference between the two most recent occurrence dates in the process's
-local timezone.
+`previous` and `interval_days` are null when only one event exists. Each
+occurrence object has the same exactly-one rule as an event. The interval is the
+difference between the two displayed calendar dates, not elapsed 24-hour blocks.
 
 ### Activity
 
 Produced once per distinct name by `list --jsonl`:
 
 ```json
-{"schema_version":1,"type":"activity","name":"furnace-filter"}
+{"schema_version":2,"type":"activity","name":"furnace-filter"}
 ```
 
 Adding a field is backward-compatible. Removing a field, renaming a field, or
@@ -89,8 +91,10 @@ changing a field's meaning requires a new `schema_version`.
 
 ### `add`
 
-`add NAME` records a new event at the current instant. Repeating the same command
-records another event; duplicates are valid history and receive different IDs.
+`add NAME` records a new event at the current UTC instant. `add NAME --date DATE`
+records only that calendar date; it never invents midnight or a timezone.
+Repeating either command records another event, because duplicates are valid
+history and receive different IDs.
 
 Human mode is silent on success. JSONL mode emits the new event record.
 
@@ -106,9 +110,9 @@ Interval: 99 days
 Occurrences: 5
 ```
 
-For one event, the `Previous` and `Interval` values are `-`. Dates are rendered
-in the process's local timezone. JSONL mode emits one summary record with full
-timestamps.
+For one event, the `Previous` and `Interval` values are `-`. Exact instants are
+rendered in the process's local timezone; date-only events render their stored
+date unchanged. JSONL mode emits one summary record that preserves both kinds.
 
 A missing activity returns 1 and writes this diagnostic:
 
@@ -118,9 +122,10 @@ lastdone: activity not found: furnace-filter
 
 ### `history`
 
-Human mode emits one local occurrence date per line. JSONL mode emits one event
-record per line. Both modes order events newest first; events with identical
-timestamps are ordered by most recent insertion first.
+Human mode emits one occurrence date per line. JSONL mode emits one event record
+per line. Both modes order by displayed calendar date, newest first. Exact
+instants precede date-only events on the same date; otherwise-equal events use
+most recent insertion first.
 
 A missing activity has the same behavior as missing `show` output.
 
@@ -138,7 +143,7 @@ Help returns 0, writes usage text to stdout, and writes nothing to stderr.
 Version returns 0 and writes exactly:
 
 ```text
-lastdone 0.1.0
+lastdone 0.2.0
 ```
 
 ## Exit codes

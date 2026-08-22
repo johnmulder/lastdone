@@ -279,7 +279,7 @@ An event records that something happened.
 ```text
 id
 name
-timestamp
+occurred_at or occurred_on
 note
 ```
 
@@ -289,7 +289,8 @@ Example:
 {
   "id": "01K...",
   "name": "furnace-filter",
-  "timestamp": "2026-08-21T14:32:00-06:00",
+  "occurred_at": "2026-08-21T20:32:00Z",
+  "occurred_on": null,
   "note": "MERV 11"
 }
 ```
@@ -351,12 +352,14 @@ The database should remain an implementation detail. The CLI is the stable inter
 CREATE TABLE events (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    note TEXT
+    occurred_at TEXT,
+    occurred_on TEXT,
+    note TEXT,
+    CHECK ((occurred_at IS NOT NULL) <> (occurred_on IS NOT NULL))
 );
 
-CREATE INDEX idx_events_name_timestamp
-ON events(name, timestamp DESC);
+CREATE INDEX idx_events_name
+ON events(name);
 
 CREATE TABLE activities (
     name TEXT PRIMARY KEY,
@@ -393,7 +396,8 @@ Avoid forcing a taxonomy prematurely.
 
 ## Time Semantics
 
-Internally, events should preserve timezone-aware timestamps.
+Events should preserve the precision the user supplied. A normal add records a
+timezone-aware UTC instant, while `--date` records only a calendar date.
 
 Human-oriented commands may usually display local dates when exact time is unimportant.
 
@@ -406,6 +410,12 @@ lastdone add furnace-filter
 records the full current timestamp, while:
 
 ```sh
+lastdone add furnace-filter --date 2026-08-20
+```
+
+records `2026-08-20` without inventing midnight or a timezone. Meanwhile:
+
+```sh
 lastdone show furnace-filter
 ```
 
@@ -415,7 +425,11 @@ may display:
 Last: 2026-08-21
 ```
 
-Machine-readable output should expose the complete timestamp.
+Machine-readable output should expose both occurrence fields with exactly one
+populated. Human output renders instants in local time and date-only events
+unchanged. Mixed history sorts by displayed calendar date; exact instants precede
+date-only events on the same date. Intervals compare calendar dates rather than
+elapsed 24-hour blocks.
 
 ---
 
