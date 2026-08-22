@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -33,19 +34,23 @@ def activity_name(value: str) -> str:
     return value
 
 
-def calendar_date(value: str) -> str:
+def calendar_date(value: str, *, today: date) -> str:
     try:
         parsed = date.fromisoformat(value)
     except ValueError:
         raise argparse.ArgumentTypeError("DATE must be YYYY-MM-DD") from None
     if parsed.isoformat() != value:
         raise argparse.ArgumentTypeError("DATE must be YYYY-MM-DD")
-    if parsed > datetime.now().astimezone().date():
+    if parsed > today:
         raise argparse.ArgumentTypeError("DATE must not be in the future")
     return value
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+def parse_args(
+    argv: Sequence[str] | None = None, *, today: date | None = None
+) -> argparse.Namespace:
+    if today is None:
+        today = datetime.now().astimezone().date()
     parser = ArgumentParser(
         prog="lastdone",
         description="Record and query recurring real-world activities.",
@@ -57,7 +62,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     add = commands.add_parser("add", help="record an activity")
     add.add_argument("name", type=activity_name, metavar="NAME")
-    add.add_argument("--date", type=calendar_date, dest="occurred_on", metavar="DATE")
+    add.add_argument(
+        "--date",
+        type=partial(calendar_date, today=today),
+        dest="occurred_on",
+        metavar="DATE",
+    )
     add.add_argument("--jsonl", action="store_true", help="emit JSONL")
     add.set_defaults(handler=add_event)
 
@@ -246,8 +256,7 @@ def prepare_storage(path: Path) -> None:
         os.chmod(path.parent, 0o700)
 
 
-def connect_database() -> sqlite3.Connection:
-    path = database_path()
+def connect_database(path: Path) -> sqlite3.Connection:
     prepare_storage(path)
     database = sqlite3.connect(path)
     database.row_factory = sqlite3.Row
@@ -261,9 +270,9 @@ def connect_database() -> sqlite3.Connection:
     return database
 
 
-def current_timestamp() -> str:
+def current_timestamp(now: datetime) -> str:
     return (
-        datetime.now(timezone.utc)
+        now.astimezone(timezone.utc)
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
@@ -326,7 +335,7 @@ def add_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     event = {
         "id": str(uuid4()),
         "name": args.name,
-        "occurred_at": None if args.occurred_on else current_timestamp(),
+        "occurred_at": None if args.occurred_on else current_timestamp(args.now),
         "occurred_on": args.occurred_on,
         "note": None,
     }
@@ -425,9 +434,17 @@ def silence_broken_pipe() -> None:
         pass
 
 
-def run(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
-    database = connect_database()
+def run(
+    argv: Sequence[str] | None = None,
+    *,
+    now: datetime | None = None,
+    path: Path | None = None,
+) -> int:
+    if now is None:
+        now = datetime.now().astimezone()
+    args = parse_args(argv, today=now.date())
+    args.now = now
+    database = connect_database(database_path() if path is None else path)
     try:
         return args.handler(database, args)
     finally:

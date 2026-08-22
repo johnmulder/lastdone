@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
+import io
 import json
 import os
 from pathlib import Path
 import re
+import runpy
 import sqlite3
 import stat
 import subprocess
@@ -16,6 +19,7 @@ from uuid import UUID
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "lastdone"
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
+RUN = runpy.run_path(str(CLI), run_name="lastdone_test")["run"]
 
 
 class CliContractTests(unittest.TestCase):
@@ -136,6 +140,43 @@ class CliContractTests(unittest.TestCase):
         )
         UUID(str(event["id"]))
         self.assertRegex(str(event["occurred_at"]), TIMESTAMP)
+
+    def test_run_boundary_accepts_fixed_time_and_database_path(self) -> None:
+        now = datetime(
+            2026,
+            8,
+            22,
+            23,
+            30,
+            0,
+            123456,
+            tzinfo=timezone(-timedelta(hours=6)),
+        )
+        database_path = self.data_home / "injected" / "custom.db"
+        error_output = io.StringIO()
+        with redirect_stderr(error_output):
+            with self.assertRaises(SystemExit) as error:
+                RUN(
+                    ("add", "future", "--date", "2026-08-23"),
+                    now=now,
+                    path=database_path,
+                )
+        self.assertEqual(2, error.exception.code)
+        self.assertIn("DATE must not be in the future", error_output.getvalue())
+        self.assertFalse(database_path.exists())
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = RUN(
+                ("add", "fixed", "--jsonl"), now=now, path=database_path
+            )
+        self.assertEqual(0, status)
+        self.assertEqual(
+            "2026-08-23T05:30:00.123456Z",
+            json.loads(output.getvalue())["occurred_at"],
+        )
+        self.assertTrue(database_path.is_file())
+        self.assertFalse((self.data_home / "last" / "last.db").exists())
 
     def test_duplicate_events_feed_show_and_newest_first_history(self) -> None:
         first = self.add_json("furnace-filter")
