@@ -7,33 +7,7 @@ Unix-like goals without turning it into a task manager.
 
 ## Before the MVP
 
-### 1. Turn the proposed CLI into a behavioral contract
-
-**Gap**
-
-The document names commands and exit codes, but not several observable edge
-cases: duplicate events, empty history, future dates, output ordering, broken
-pipes, or whether diagnostics can appear on standard output. Those decisions
-become compatibility constraints as soon as another command consumes `--jsonl`.
-
-**Approach**
-
-Write a compact command contract and encode it as end-to-end CLI tests. Define
-arguments, standard output, standard error, exit status, sort order, and the
-JSONL shape for each MVP command. Human output may evolve; JSONL fields and
-semantics should be versioned deliberately.
-
-**Implementation considerations**
-
-- Send records only to stdout and diagnostics only to stderr.
-- Emit exactly one complete JSON object per line in JSONL mode, including for
-  single-record commands.
-- Make ordering explicit: newest first for history and bytewise ascending by
-  activity key for list output.
-- Treat an empty list as successful and a missing named activity as exit code 1.
-- Handle a closed downstream pipe without printing a traceback.
-
-### 2. Distinguish an instant from a calendar date
+### 1. Distinguish an instant from a calendar date
 
 **Gap**
 
@@ -57,7 +31,7 @@ local date for both, while machine output preserves which kind was supplied.
 - Calculate day-based intervals from calendar dates, not elapsed 24-hour blocks,
   so daylight-saving transitions do not create surprising results.
 
-### 3. Add schema constraints and tiny, forward-only migrations
+### 2. Add schema constraints and tiny, forward-only migrations
 
 **Gap**
 
@@ -82,7 +56,7 @@ inside a transaction before executing the requested command.
 - Back up before a destructive migration; avoid an ORM or migration dependency
   for a schema this small.
 
-### 4. Keep the first implementation standard-library sized
+### 3. Keep the first implementation standard-library sized
 
 **Gap**
 
@@ -105,7 +79,7 @@ formatting that genuinely need independent tests.
   deterministic without a general dependency-injection system.
 - Add a formatter and linter only if they remove recurring review work.
 
-### 5. Specify data-location overrides and concurrency behavior
+### 4. Specify data-location overrides and concurrency behavior
 
 **Gap**
 
@@ -130,7 +104,7 @@ Use short SQLite transactions and a modest busy timeout for concurrent writers.
 
 ## Immediately after the MVP
 
-### 6. Provide lossless export, idempotent import, and basic diagnostics
+### 5. Provide lossless export, idempotent import, and basic diagnostics
 
 **Gap**
 
@@ -154,7 +128,7 @@ stream and treat an already-present identical ID as a no-op.
 - Have `doctor` check schema version, integrity, permissions, and parseability;
   it should not mutate data unless explicitly asked to repair it.
 
-### 7. Add explicit correction without erasing history
+### 6. Add explicit correction without erasing history
 
 **Gap**
 
@@ -179,7 +153,7 @@ history, with an option to include corrections.
   effective, non-void history should be the single source of truth.
 - Do not build general event sourcing; two explicit relationships are enough.
 
-### 8. Make interval semantics deliberately narrow
+### 7. Make interval semantics deliberately narrow
 
 **Gap**
 
@@ -204,7 +178,7 @@ calendar months only after a real use case justifies separate month arithmetic.
   explicit machine-readable states.
 - Allow a clock/timezone override in tests to cover leap days and DST boundaries.
 
-### 9. Separate stable ASCII keys from human display names
+### 8. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -232,7 +206,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 10. Publish personal-OS conventions as fixtures, not a shared library
+### 9. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -257,7 +231,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 11. Support one structured reading per event
+### 10. Support one structured reading per event
 
 **Gap**
 
@@ -283,7 +257,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 12. Add batch capture through standard input
+### 11. Add batch capture through standard input
 
 **Gap**
 
