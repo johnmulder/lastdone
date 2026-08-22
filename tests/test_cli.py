@@ -12,6 +12,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from uuid import UUID
 
@@ -681,6 +682,55 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(3, result.returncode)
         self.assertEqual("", result.stdout)
         self.assertTrue(result.stderr.startswith("lastdone: storage error:"))
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_concurrent_first_adds_wait_and_preserve_both_events(self) -> None:
+        database_path = self.data_home / "last" / "last.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as locker:
+            locker.execute("BEGIN IMMEDIATE")
+            processes = [
+                subprocess.Popen(
+                    [str(CLI), "add", "concurrent", "--jsonl"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=self.environment,
+                )
+                for _ in range(2)
+            ]
+            time.sleep(0.2)
+            blocked_states = [process.poll() for process in processes]
+            locker.rollback()
+
+        results = [process.communicate(timeout=10) for process in processes]
+        self.assertEqual([None, None], blocked_states)
+        for process, (stdout, stderr) in zip(processes, results):
+            self.assertEqual(0, process.returncode, stderr)
+            self.assertEqual("", stderr)
+            self.assertEqual("concurrent", json.loads(stdout)["name"])
+
+        history_result = self.run_cli("history", "concurrent", "--jsonl")
+        self.assertEqual(0, history_result.returncode, history_result.stderr)
+        history = [json.loads(line) for line in history_result.stdout.splitlines()]
+        self.assertEqual(2, len(history))
+        self.assertEqual(2, len({event["id"] for event in history}))
+
+    def test_lock_timeout_is_actionable_storage_error(self) -> None:
+        self.assertEqual(0, self.run_cli("list").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as locker:
+            locker.execute("BEGIN IMMEDIATE")
+            result = self.run_cli("add", "blocked")
+            locker.rollback()
+
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertEqual(
+            "lastdone: storage error: database is busy after 5 seconds; "
+            "retry the command\n",
+            result.stderr,
+        )
         self.assertNotIn("Traceback", result.stderr)
 
     def test_closed_pipe_exits_cleanly(self) -> None:

@@ -17,6 +17,7 @@ from uuid import uuid4
 
 VERSION = "0.4.0"
 SCHEMA_VERSION = 1
+BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class ActivityNotFound(Exception):
@@ -264,12 +265,23 @@ def apply_migrations(database: sqlite3.Connection, path: Path) -> None:
         )
     if version == 0:
         backup_before_migration(database, path)
-    for target_version in range(version + 1, SCHEMA_VERSION + 1):
+    while version < SCHEMA_VERSION:
         database.execute("BEGIN IMMEDIATE")
         try:
+            version = database_schema_version(database)
+            if version > SCHEMA_VERSION:
+                raise sqlite3.DatabaseError(
+                    f"database schema version {version} is newer than supported "
+                    f"version {SCHEMA_VERSION}"
+                )
+            if version == SCHEMA_VERSION:
+                database.commit()
+                break
+            target_version = version + 1
             MIGRATIONS[target_version - 1](database)
             database.execute(f"PRAGMA user_version = {target_version}")
             database.commit()
+            version = target_version
         except Exception:
             database.rollback()
             raise
@@ -284,7 +296,7 @@ def prepare_storage(path: Path) -> None:
 
 def connect_database(path: Path) -> sqlite3.Connection:
     prepare_storage(path)
-    database = sqlite3.connect(path)
+    database = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
     database.row_factory = sqlite3.Row
     try:
         apply_migrations(database, path)
@@ -460,6 +472,18 @@ def silence_broken_pipe() -> None:
         pass
 
 
+def storage_error_message(error: OSError | sqlite3.Error) -> str:
+    message = str(error)
+    if isinstance(error, sqlite3.OperationalError) and any(
+        state in message.lower() for state in ("busy", "locked")
+    ):
+        return (
+            f"database is busy after {BUSY_TIMEOUT_SECONDS:g} seconds; "
+            "retry the command"
+        )
+    return message
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -489,7 +513,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"lastdone: activity not found: {error}", file=sys.stderr)
         return 1
     except (OSError, sqlite3.Error) as error:
-        print(f"lastdone: storage error: {error}", file=sys.stderr)
+        print(
+            f"lastdone: storage error: {storage_error_message(error)}",
+            file=sys.stderr,
+        )
         return 3
 
 
