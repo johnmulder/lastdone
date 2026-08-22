@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import sys
 from datetime import date, datetime, timezone
 from typing import Any, Sequence
@@ -120,6 +121,10 @@ def parse_args(
     import_command = commands.add_parser("import", help="import events")
     import_command.add_argument("--jsonl", action="store_true", required=True)
     import_command.set_defaults(handler=import_events)
+
+    doctor_command = commands.add_parser("doctor", help="check the database")
+    doctor_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    doctor_command.set_defaults(handler=doctor_database)
 
     return parser.parse_args(argv)
 
@@ -241,7 +246,7 @@ def backup_before_migration(database: sqlite3.Connection, path: Path) -> None:
         os.chmod(backup_path, 0o600)
 
 
-def validate_schema(database: sqlite3.Connection) -> None:
+def validate_schema_structure(database: sqlite3.Connection) -> None:
     expected_columns = ("id", "name", "occurred_at", "occurred_on", "note")
     if table_columns(database) != expected_columns:
         raise sqlite3.DatabaseError("database schema does not match its version")
@@ -263,6 +268,10 @@ def validate_schema(database: sqlite3.Connection) -> None:
     }
     if "idx_events_name" not in indexes:
         raise sqlite3.DatabaseError("database schema does not match its version")
+
+
+def validate_schema(database: sqlite3.Connection) -> None:
+    validate_schema_structure(database)
     integrity = database.execute("PRAGMA integrity_check(1)").fetchone()[0]
     if integrity != "ok":
         raise sqlite3.DatabaseError(f"database integrity check failed: {integrity}")
@@ -316,6 +325,17 @@ def connect_database(path: Path) -> sqlite3.Connection:
         database.close()
         raise
     return database
+
+
+def connect_read_only(path: Path) -> tuple[Path, sqlite3.Connection]:
+    resolved = path.resolve()
+    database = sqlite3.connect(
+        f"{resolved.as_uri()}?mode=ro",
+        uri=True,
+        timeout=BUSY_TIMEOUT_SECONDS,
+    )
+    database.row_factory = sqlite3.Row
+    return resolved, database
 
 
 def current_timestamp(now: datetime) -> str:
@@ -603,6 +623,90 @@ def import_events(database: sqlite3.Connection, args: argparse.Namespace) -> int
     return 0
 
 
+def doctor_database(path: Path, args: argparse.Namespace) -> int:
+    resolved, database = connect_read_only(path)
+    try:
+        version: int | None = None
+        try:
+            version = database_schema_version(database)
+            if version != SCHEMA_VERSION:
+                raise sqlite3.DatabaseError(
+                    f"expected version {SCHEMA_VERSION}, found {version}"
+                )
+            validate_schema_structure(database)
+            schema = "ok"
+        except sqlite3.Error as error:
+            schema = str(error)
+
+        try:
+            integrity_result = database.execute(
+                "PRAGMA integrity_check(1)"
+            ).fetchone()
+            integrity = integrity_result[0] if integrity_result else "no result"
+        except sqlite3.Error as error:
+            integrity = str(error)
+
+        if os.name == "posix":
+            try:
+                mode = stat.S_IMODE(resolved.stat().st_mode)
+                permissions = (
+                    "ok" if mode == 0o600 else f"expected 0600, found {mode:04o}"
+                )
+            except OSError as error:
+                permissions = str(error)
+        else:
+            permissions = "not-applicable"
+
+        events: int | None = 0
+        try:
+            rows = database.execute(
+                """
+                SELECT id, name, occurred_at, occurred_on, note
+                FROM events
+                ORDER BY rowid
+                """
+            )
+            for events, row in enumerate(rows, 1):
+                encoded = json.dumps(interchange_record(row), ensure_ascii=False)
+                parse_import_record(encoded, events)
+            parseability = "ok"
+        except (InvalidImport, sqlite3.Error, TypeError, UnicodeError) as error:
+            events = None
+            parseability = str(error)
+
+        checks = (schema, integrity, permissions, parseability)
+        status = (
+            "ok"
+            if all(check in ("ok", "not-applicable") for check in checks)
+            else "problems"
+        )
+        report = {
+            "schema_version": 2,
+            "type": "doctor",
+            "database": str(resolved),
+            "database_schema_version": version,
+            "schema": schema,
+            "integrity": integrity,
+            "permissions": permissions,
+            "parseability": parseability,
+            "events": events,
+            "status": status,
+        }
+        if args.jsonl:
+            emit_json(report)
+        else:
+            print(f"Database: {report['database']}")
+            print(f"Schema: {schema}")
+            print(f"Integrity: {integrity}")
+            print(f"Permissions: {permissions}")
+            print(f"Parseability: {parseability}")
+            print(f"Events: {events if events is not None else '-'}")
+            print(f"Status: {status}")
+        return 0 if status == "ok" else 3
+    finally:
+        database.close()
+
+
 def silence_broken_pipe() -> None:
     try:
         stdout = sys.stdout.fileno()
@@ -639,6 +743,8 @@ def run(
     args.now = now
     if path is None:
         path = args.database if args.database is not None else database_path()
+    if args.command == "doctor":
+        return args.handler(path, args)
     database = connect_database(path)
     try:
         return args.handler(database, args)

@@ -68,6 +68,7 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("--db PATH", help_result.stdout)
         self.assertIn("export", help_result.stdout)
         self.assertIn("import", help_result.stdout)
+        self.assertIn("doctor", help_result.stdout)
         self.assertEqual("", help_result.stderr)
 
     def test_invalid_input_uses_exit_two_and_stderr(self) -> None:
@@ -335,6 +336,99 @@ class CliContractTests(unittest.TestCase):
                     "--db", str(database_path), "export", "--jsonl"
                 )
                 self.assertEqual("", exported.stdout)
+
+    def test_doctor_reports_health_without_mutating_database(self) -> None:
+        self.add_json("instant")
+        self.add_json("dated", "--date", "2024-02-29")
+        database_path = self.data_home / "last" / "last.db"
+        before = database_path.read_bytes()
+
+        human = self.run_cli("doctor")
+        self.assertEqual(0, human.returncode, human.stderr)
+        self.assertEqual("", human.stderr)
+        self.assertIn(f"Database: {database_path.resolve()}\n", human.stdout)
+        self.assertIn("Schema: ok\n", human.stdout)
+        self.assertIn("Integrity: ok\n", human.stdout)
+        self.assertIn("Parseability: ok\n", human.stdout)
+        self.assertIn("Events: 2\nStatus: ok\n", human.stdout)
+
+        machine = self.run_cli("doctor", "--jsonl")
+        self.assertEqual(0, machine.returncode, machine.stderr)
+        self.assertEqual("", machine.stderr)
+        self.assertEqual(
+            {
+                "schema_version": 2,
+                "type": "doctor",
+                "database": str(database_path.resolve()),
+                "database_schema_version": 1,
+                "schema": "ok",
+                "integrity": "ok",
+                "permissions": "ok" if os.name == "posix" else "not-applicable",
+                "parseability": "ok",
+                "events": 2,
+                "status": "ok",
+            },
+            json.loads(machine.stdout),
+        )
+        self.assertEqual(before, database_path.read_bytes())
+        self.assertFalse(database_path.with_name("last.db.v0.bak").exists())
+
+    def test_doctor_reports_unhealthy_database_without_migrating(self) -> None:
+        database_path = self.data_home / "legacy-doctor" / "last.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                """
+                CREATE TABLE events (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    note TEXT
+                )
+                """
+            )
+            database.execute(
+                """
+                INSERT INTO events (id, name, occurred_at, note)
+                VALUES ('legacy', 'legacy', '2026-01-01T00:00:00.000000Z', NULL)
+                """
+            )
+            database.commit()
+        if os.name == "posix":
+            os.chmod(database_path, 0o644)
+        before = database_path.read_bytes()
+
+        result = self.run_cli(
+            "--db", str(database_path), "doctor", "--jsonl"
+        )
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(0, report["database_schema_version"])
+        self.assertNotEqual("ok", report["schema"])
+        self.assertEqual("ok", report["integrity"])
+        if os.name == "posix":
+            self.assertEqual("expected 0600, found 0644", report["permissions"])
+        self.assertNotEqual("ok", report["parseability"])
+        self.assertIsNone(report["events"])
+        self.assertEqual("problems", report["status"])
+        self.assertEqual(before, database_path.read_bytes())
+        self.assertFalse(database_path.with_name("last.db.v0.bak").exists())
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(0, database.execute("PRAGMA user_version").fetchone()[0])
+            self.assertNotIn(
+                "occurred_on",
+                {row[1] for row in database.execute("PRAGMA table_info(events)")},
+            )
+
+    def test_doctor_does_not_create_missing_database(self) -> None:
+        database_path = self.data_home / "missing" / "last.db"
+        result = self.run_cli("--db", str(database_path), "doctor")
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("lastdone: storage error:"))
+        self.assertFalse(database_path.exists())
+        self.assertFalse(database_path.parent.exists())
 
     def test_run_boundary_accepts_fixed_time_and_database_path(self) -> None:
         now = datetime(

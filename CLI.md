@@ -123,8 +123,8 @@ Produced once by `doctor --jsonl`:
 ```
 
 `status` is `ok` only when every applicable check passes. On non-POSIX systems,
-`permissions` is `not-applicable`. `events` is null when the events cannot be
-read safely.
+`permissions` is `not-applicable`. `database_schema_version` or `events` is null
+when that value cannot be read safely.
 
 Adding a field is backward-compatible. Removing a field, renaming a field, or
 changing a field's meaning requires a new `schema_version`.
