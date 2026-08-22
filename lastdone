@@ -9,12 +9,12 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 class ActivityNotFound(Exception):
@@ -32,6 +32,18 @@ def activity_name(value: str) -> str:
     return value
 
 
+def calendar_date(value: str) -> str:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("DATE must be YYYY-MM-DD") from None
+    if parsed.isoformat() != value:
+        raise argparse.ArgumentTypeError("DATE must be YYYY-MM-DD")
+    if parsed > datetime.now().astimezone().date():
+        raise argparse.ArgumentTypeError("DATE must not be in the future")
+    return value
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = ArgumentParser(
         prog="lastdone",
@@ -44,6 +56,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     add = commands.add_parser("add", help="record an activity")
     add.add_argument("name", type=activity_name, metavar="NAME")
+    add.add_argument("--date", type=calendar_date, dest="occurred_on", metavar="DATE")
     add.add_argument("--jsonl", action="store_true", help="emit JSONL")
     add.set_defaults(handler=add_event)
 
@@ -70,26 +83,57 @@ def database_path() -> Path:
     return root / "last" / "last.db"
 
 
+def create_events_table(database: sqlite3.Connection) -> None:
+    database.execute(
+        """
+        CREATE TABLE events (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            occurred_at TEXT,
+            occurred_on TEXT,
+            note TEXT,
+            CHECK ((occurred_at IS NOT NULL) <> (occurred_on IS NOT NULL))
+        )
+        """
+    )
+
+
+def initialize_schema(database: sqlite3.Connection) -> None:
+    columns = {
+        row["name"] for row in database.execute("PRAGMA table_info(events)")
+    }
+    if not columns:
+        create_events_table(database)
+    elif "occurred_on" not in columns:
+        database.execute("BEGIN")
+        try:
+            database.execute("ALTER TABLE events RENAME TO events_legacy")
+            create_events_table(database)
+            database.execute(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                SELECT id, name, occurred_at, NULL, note
+                FROM events_legacy
+                """
+            )
+            database.execute("DROP TABLE events_legacy")
+            database.commit()
+        except Exception:
+            database.rollback()
+            raise
+    database.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_name ON events(name)"
+    )
+    database.commit()
+
+
 def connect_database() -> sqlite3.Connection:
     path = database_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     database = sqlite3.connect(path)
     database.row_factory = sqlite3.Row
     try:
-        database.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                occurred_at TEXT NOT NULL,
-                note TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_events_name_occurred_at
-            ON events(name, occurred_at DESC);
-            """
-        )
-        database.commit()
+        initialize_schema(database)
     except Exception:
         database.close()
         raise
@@ -106,11 +150,12 @@ def current_timestamp() -> str:
 
 def event_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "type": "event",
         "id": row["id"],
         "name": row["name"],
         "occurred_at": row["occurred_at"],
+        "occurred_on": row["occurred_on"],
         "note": row["note"],
     }
 
@@ -122,31 +167,60 @@ def emit_json(record: dict[str, Any]) -> None:
 def rows_for_activity(
     database: sqlite3.Connection, name: str
 ) -> list[sqlite3.Row]:
-    return database.execute(
+    rows = database.execute(
         """
-        SELECT id, name, occurred_at, note
+        SELECT rowid AS insertion_order, id, name, occurred_at, occurred_on, note
         FROM events
         WHERE name = ?
-        ORDER BY occurred_at DESC, rowid DESC
         """,
         (name,),
     ).fetchall()
+    return sorted(rows, key=occurrence_sort_key, reverse=True)
 
 
-def local_date(timestamp: str):
+def local_date(timestamp: str) -> date:
     return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone().date()
+
+
+def occurrence_date(row: sqlite3.Row | dict[str, Any]) -> date:
+    if row["occurred_on"] is not None:
+        return date.fromisoformat(row["occurred_on"])
+    return local_date(row["occurred_at"])
+
+
+def occurrence_sort_key(row: sqlite3.Row) -> tuple[date, bool, str, int]:
+    return (
+        occurrence_date(row),
+        row["occurred_at"] is not None,
+        row["occurred_at"] or "",
+        row["insertion_order"],
+    )
+
+
+def occurrence_record(row: sqlite3.Row) -> dict[str, str | None]:
+    return {"occurred_at": row["occurred_at"], "occurred_on": row["occurred_on"]}
 
 
 def add_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     event = {
         "id": str(uuid4()),
         "name": args.name,
-        "occurred_at": current_timestamp(),
+        "occurred_at": None if args.occurred_on else current_timestamp(),
+        "occurred_on": args.occurred_on,
         "note": None,
     }
     database.execute(
-        "INSERT INTO events (id, name, occurred_at, note) VALUES (?, ?, ?, ?)",
-        (event["id"], event["name"], event["occurred_at"], event["note"]),
+        """
+        INSERT INTO events (id, name, occurred_at, occurred_on, note)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            event["id"],
+            event["name"],
+            event["occurred_at"],
+            event["occurred_on"],
+            event["note"],
+        ),
     )
     database.commit()
     if args.jsonl:
@@ -162,18 +236,18 @@ def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int
     latest = rows[0]
     previous = rows[1] if len(rows) > 1 else None
     interval = (
-        (local_date(latest["occurred_at"]) - local_date(previous["occurred_at"])).days
+        (occurrence_date(latest) - occurrence_date(previous)).days
         if previous
         else None
     )
     if args.jsonl:
         emit_json(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "type": "summary",
                 "name": args.name,
-                "last": latest["occurred_at"],
-                "previous": previous["occurred_at"] if previous else None,
+                "last": occurrence_record(latest),
+                "previous": occurrence_record(previous) if previous else None,
                 "interval_days": interval,
                 "occurrences": len(rows),
             }
@@ -181,9 +255,9 @@ def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int
         return 0
 
     print(args.name)
-    print(f"Last: {local_date(latest['occurred_at']).isoformat()}")
+    print(f"Last: {occurrence_date(latest).isoformat()}")
     print(
-        f"Previous: {local_date(previous['occurred_at']).isoformat()}"
+        f"Previous: {occurrence_date(previous).isoformat()}"
         if previous
         else "Previous: -"
     )
@@ -200,7 +274,7 @@ def show_history(database: sqlite3.Connection, args: argparse.Namespace) -> int:
         if args.jsonl:
             emit_json(event_record(row))
         else:
-            print(local_date(row["occurred_at"]).isoformat())
+            print(occurrence_date(row).isoformat())
     return 0
 
 
@@ -211,7 +285,7 @@ def list_activities(database: sqlite3.Connection, args: argparse.Namespace) -> i
     for row in rows:
         if args.jsonl:
             emit_json(
-                {"schema_version": 1, "type": "activity", "name": row["name"]}
+                {"schema_version": 2, "type": "activity", "name": row["name"]}
             )
         else:
             print(row["name"])

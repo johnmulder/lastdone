@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -38,8 +39,8 @@ class CliContractTests(unittest.TestCase):
             check=False,
         )
 
-    def add_json(self, name: str) -> dict[str, object]:
-        result = self.run_cli("add", name, "--jsonl")
+    def add_json(self, name: str, *options: str) -> dict[str, object]:
+        result = self.run_cli("add", name, *options, "--jsonl")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("", result.stderr)
         self.assertEqual(1, result.stdout.count("\n"))
@@ -48,7 +49,7 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.1.0\n", version.stdout)
+        self.assertEqual("lastdone 0.2.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
@@ -63,7 +64,9 @@ class CliContractTests(unittest.TestCase):
             ("add", ""),
             ("add", "line\nbreak"),
             ("add", "escape\x1bsequence"),
-            ("add", "future", "--date", "2027-01-01"),
+            ("add", "bad-date", "--date", "2026-02-29"),
+            ("add", "compact-date", "--date", "20260821"),
+            ("add", "future", "--date", "9999-12-31"),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_cli(*arguments)
@@ -98,11 +101,12 @@ class CliContractTests(unittest.TestCase):
         event = self.add_json("furnace-filter")
         self.assertEqual(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "type": "event",
                 "id": event["id"],
                 "name": "furnace-filter",
                 "occurred_at": event["occurred_at"],
+                "occurred_on": None,
                 "note": None,
             },
             event,
@@ -121,11 +125,17 @@ class CliContractTests(unittest.TestCase):
         summary = json.loads(summary_result.stdout)
         self.assertEqual(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "type": "summary",
                 "name": "furnace-filter",
-                "last": second["occurred_at"],
-                "previous": first["occurred_at"],
+                "last": {
+                    "occurred_at": second["occurred_at"],
+                    "occurred_on": None,
+                },
+                "previous": {
+                    "occurred_at": first["occurred_at"],
+                    "occurred_on": None,
+                },
                 "interval_days": 0,
                 "occurrences": 2,
             },
@@ -162,13 +172,183 @@ class CliContractTests(unittest.TestCase):
         event = self.add_json("single")
         summary = self.run_cli("show", "single", "--jsonl")
         record = json.loads(summary.stdout)
-        self.assertEqual(event["occurred_at"], record["last"])
+        self.assertEqual(
+            {"occurred_at": event["occurred_at"], "occurred_on": None},
+            record["last"],
+        )
         self.assertIsNone(record["previous"])
         self.assertIsNone(record["interval_days"])
         self.assertEqual(1, record["occurrences"])
 
         human = self.run_cli("show", "single")
         self.assertIn("\nPrevious: -\nInterval: -\nOccurrences: 1\n", human.stdout)
+
+    def test_date_only_event_is_explicit_and_timezone_independent(self) -> None:
+        event = self.add_json("leap-day", "--date", "2024-02-29")
+        self.assertEqual(
+            {
+                "schema_version": 2,
+                "type": "event",
+                "id": event["id"],
+                "name": "leap-day",
+                "occurred_at": None,
+                "occurred_on": "2024-02-29",
+                "note": None,
+            },
+            event,
+        )
+        machine_summary = self.run_cli("show", "leap-day", "--jsonl")
+        self.assertEqual(
+            {"occurred_at": None, "occurred_on": "2024-02-29"},
+            json.loads(machine_summary.stdout)["last"],
+        )
+
+        for timezone_name in ("UTC", "Pacific/Honolulu", "Pacific/Kiritimati"):
+            with self.subTest(timezone=timezone_name):
+                environment = self.environment.copy()
+                environment["TZ"] = timezone_name
+                summary = self.run_cli(
+                    "show", "leap-day", environment=environment
+                )
+                history = self.run_cli(
+                    "history", "leap-day", environment=environment
+                )
+                self.assertEqual(
+                    "leap-day\nLast: 2024-02-29\nPrevious: -\n"
+                    "Interval: -\nOccurrences: 1\n",
+                    summary.stdout,
+                )
+                self.assertEqual("2024-02-29\n", history.stdout)
+
+    def test_mixed_precision_order_and_dst_interval_use_local_dates(self) -> None:
+        date_event = self.add_json("mixed", "--date", "2026-03-08")
+        self.assertEqual(0, self.run_cli("list").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.executemany(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        "mixed-instant",
+                        "mixed",
+                        "2026-03-09T01:00:00.000000Z",
+                        None,
+                        None,
+                    ),
+                    (
+                        "dst-before",
+                        "dst",
+                        "2026-03-08T07:30:00.000000Z",
+                        None,
+                        None,
+                    ),
+                    (
+                        "dst-after",
+                        "dst",
+                        "2026-03-09T06:30:00.000000Z",
+                        None,
+                        None,
+                    ),
+                ),
+            )
+            database.commit()
+
+        denver = self.environment.copy()
+        denver["TZ"] = "America/Denver"
+        history = self.run_cli("history", "mixed", "--jsonl", environment=denver)
+        records = [json.loads(line) for line in history.stdout.splitlines()]
+        self.assertEqual(
+            ["mixed-instant", date_event["id"]],
+            [record["id"] for record in records],
+        )
+
+        summary = self.run_cli("show", "dst", "--jsonl", environment=denver)
+        record = json.loads(summary.stdout)
+        self.assertEqual(1, record["interval_days"])
+        self.assertEqual(
+            {
+                "occurred_at": "2026-03-09T06:30:00.000000Z",
+                "occurred_on": None,
+            },
+            record["last"],
+        )
+        human = self.run_cli("show", "dst", environment=denver)
+        self.assertIn("\nLast: 2026-03-09\nPrevious: 2026-03-08\nInterval: 1 days\n", human.stdout)
+
+    def test_schema_requires_exactly_one_occurrence_value(self) -> None:
+        self.assertEqual(0, self.run_cli("list").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            with self.assertRaises(sqlite3.IntegrityError):
+                database.execute(
+                    """
+                    INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                    VALUES ('neither', 'invalid', NULL, NULL, NULL)
+                    """
+                )
+            database.rollback()
+            with self.assertRaises(sqlite3.IntegrityError):
+                database.execute(
+                    """
+                    INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                    VALUES ('both', 'invalid', '2026-01-01T00:00:00.000000Z',
+                            '2026-01-01', NULL)
+                    """
+                )
+
+    def test_legacy_database_migrates_without_changing_instant(self) -> None:
+        database_path = self.data_home / "last" / "last.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.executescript(
+                """
+                CREATE TABLE events (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    note TEXT
+                );
+                CREATE INDEX idx_events_name_occurred_at
+                ON events(name, occurred_at DESC);
+                INSERT INTO events (id, name, occurred_at, note)
+                VALUES ('legacy-id', 'legacy',
+                        '2026-08-21T20:32:00.000000Z', 'preserved');
+                """
+            )
+            database.commit()
+
+        result = self.run_cli("history", "legacy", "--jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            {
+                "schema_version": 2,
+                "type": "event",
+                "id": "legacy-id",
+                "name": "legacy",
+                "occurred_at": "2026-08-21T20:32:00.000000Z",
+                "occurred_on": None,
+                "note": "preserved",
+            },
+            json.loads(result.stdout),
+        )
+
+        with closing(sqlite3.connect(database_path)) as database:
+            columns = {
+                row[1] for row in database.execute("PRAGMA table_info(events)")
+            }
+            indexes = {
+                row[1] for row in database.execute("PRAGMA index_list(events)")
+            }
+            table_sql = database.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'events'"
+            ).fetchone()[0]
+        self.assertIn("occurred_on", columns)
+        self.assertIn("idx_events_name", indexes)
+        self.assertNotIn("idx_events_name_occurred_at", indexes)
+        self.assertIn("CHECK", table_sql)
 
     def test_list_is_distinct_and_ordered_by_utf8_bytes(self) -> None:
         names = ["zeta", "alpha", "Alpha", "éclair", "alpha"]
@@ -186,7 +366,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(expected, [record["name"] for record in records])
         self.assertTrue(
             all(
-                record["schema_version"] == 1 and record["type"] == "activity"
+                record["schema_version"] == 2 and record["type"] == "activity"
                 for record in records
             )
         )
@@ -206,7 +386,7 @@ class CliContractTests(unittest.TestCase):
     def test_closed_pipe_exits_cleanly(self) -> None:
         self.assertEqual(0, self.run_cli("add", "seed").returncode)
         database_path = self.data_home / "last" / "last.db"
-        with sqlite3.connect(database_path) as database:
+        with closing(sqlite3.connect(database_path)) as database:
             database.executemany(
                 "INSERT INTO events (id, name, occurred_at, note) VALUES (?, ?, ?, ?)",
                 (
@@ -219,6 +399,7 @@ class CliContractTests(unittest.TestCase):
                     for index in range(20_000)
                 ),
             )
+            database.commit()
 
         process = subprocess.Popen(
             [str(CLI), "list"],
