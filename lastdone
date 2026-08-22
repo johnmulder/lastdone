@@ -15,7 +15,7 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 SCHEMA_VERSION = 1
 
 
@@ -32,6 +32,22 @@ def activity_name(value: str) -> str:
     if not value or not value.isprintable():
         raise argparse.ArgumentTypeError("NAME must be non-empty printable text")
     return value
+
+
+def expanded_path(value: str) -> Path:
+    try:
+        return Path(value).expanduser()
+    except RuntimeError as error:
+        raise OSError(str(error)) from error
+
+
+def database_file(value: str) -> Path:
+    if not value:
+        raise argparse.ArgumentTypeError("PATH must be non-empty")
+    try:
+        return expanded_path(value)
+    except OSError:
+        raise argparse.ArgumentTypeError("PATH contains an unknown home") from None
 
 
 def calendar_date(value: str, *, today: date) -> str:
@@ -57,6 +73,13 @@ def parse_args(
     )
     parser.add_argument(
         "--version", action="version", version=f"lastdone {VERSION}"
+    )
+    parser.add_argument(
+        "--db",
+        type=database_file,
+        dest="database",
+        metavar="PATH",
+        help="use PATH as the database",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -89,8 +112,11 @@ def parse_args(
 
 
 def database_path() -> Path:
+    configured = os.environ.get("LASTDONE_DB")
+    if configured:
+        return expanded_path(configured)
     data_home = os.environ.get("XDG_DATA_HOME")
-    root = Path(data_home).expanduser() if data_home else Path.home() / ".local/share"
+    root = expanded_path(data_home) if data_home else Path.home() / ".local/share"
     return root / "last" / "last.db"
 
 
@@ -444,7 +470,9 @@ def run(
         now = datetime.now().astimezone()
     args = parse_args(argv, today=now.date())
     args.now = now
-    database = connect_database(database_path() if path is None else path)
+    if path is None:
+        path = args.database if args.database is not None else database_path()
+    database = connect_database(path)
     try:
         return args.handler(database, args)
     finally:

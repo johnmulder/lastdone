@@ -54,12 +54,13 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.3.0\n", version.stdout)
+        self.assertEqual("lastdone 0.4.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
         self.assertEqual(0, help_result.returncode)
         self.assertIn("usage: lastdone", help_result.stdout)
+        self.assertIn("--db PATH", help_result.stdout)
         self.assertEqual("", help_result.stderr)
 
     def test_invalid_input_uses_exit_two_and_stderr(self) -> None:
@@ -72,6 +73,8 @@ class CliContractTests(unittest.TestCase):
             ("add", "bad-date", "--date", "2026-02-29"),
             ("add", "compact-date", "--date", "20260821"),
             ("add", "future", "--date", "9999-12-31"),
+            ("--db", "", "list"),
+            ("list", "--db", "somewhere.db"),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_cli(*arguments)
@@ -79,6 +82,48 @@ class CliContractTests(unittest.TestCase):
                 self.assertEqual("", result.stdout)
                 self.assertTrue(result.stderr.startswith("lastdone: error:"))
                 self.assertNotIn("Traceback", result.stderr)
+
+    def test_database_path_precedence(self) -> None:
+        home = self.data_home / "home"
+        environment_path = home / "environment" / "last.db"
+        xdg_path = self.data_home / "last" / "last.db"
+        environment = self.environment.copy()
+        environment["HOME"] = str(home)
+        environment["LASTDONE_DB"] = "~/environment/last.db"
+
+        cli_result = self.run_cli(
+            "--db", "~/cli/last.db", "add", "cli", environment=environment
+        )
+        self.assertEqual(0, cli_result.returncode, cli_result.stderr)
+        self.assertTrue((home / "cli" / "last.db").is_file())
+        self.assertFalse(environment_path.exists())
+        self.assertFalse(xdg_path.exists())
+
+        environment_result = self.run_cli(
+            "add", "environment", environment=environment
+        )
+        self.assertEqual(
+            0, environment_result.returncode, environment_result.stderr
+        )
+        self.assertTrue(environment_path.is_file())
+        self.assertFalse(xdg_path.exists())
+
+        environment["LASTDONE_DB"] = ""
+        xdg_result = self.run_cli("add", "xdg", environment=environment)
+        self.assertEqual(0, xdg_result.returncode, xdg_result.stderr)
+        self.assertTrue(xdg_path.is_file())
+
+        fallback_home = self.data_home / "fallback-home"
+        environment.pop("LASTDONE_DB")
+        environment.pop("XDG_DATA_HOME")
+        environment["HOME"] = str(fallback_home)
+        fallback_result = self.run_cli(
+            "add", "fallback", environment=environment
+        )
+        self.assertEqual(0, fallback_result.returncode, fallback_result.stderr)
+        self.assertTrue(
+            (fallback_home / ".local" / "share" / "last" / "last.db").is_file()
+        )
 
     def test_empty_list_and_missing_activity(self) -> None:
         for arguments in (("list",), ("list", "--jsonl")):
