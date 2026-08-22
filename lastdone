@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""Record and query the last time an activity happened."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from typing import Any, Sequence
+from uuid import uuid4
+
+
+VERSION = "0.1.0"
+
+
+class ActivityNotFound(Exception):
+    """Raised when a requested activity has no events."""
+
+
+def activity_name(value: str) -> str:
+    if not value:
+        raise argparse.ArgumentTypeError("NAME must not be empty")
+    return value
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="lastdone",
+        description="Record and query recurring real-world activities.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"lastdone {VERSION}"
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    add = commands.add_parser("add", help="record an activity")
+    add.add_argument("name", type=activity_name, metavar="NAME")
+    add.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    add.set_defaults(handler=add_event)
+
+    show = commands.add_parser("show", help="show an activity summary")
+    show.add_argument("name", type=activity_name, metavar="NAME")
+    show.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    show.set_defaults(handler=show_activity)
+
+    history = commands.add_parser("history", help="show full activity history")
+    history.add_argument("name", type=activity_name, metavar="NAME")
+    history.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    history.set_defaults(handler=show_history)
+
+    list_command = commands.add_parser("list", help="list known activities")
+    list_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    list_command.set_defaults(handler=list_activities)
+
+    return parser.parse_args(argv)
+
+
+def database_path() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME")
+    root = Path(data_home).expanduser() if data_home else Path.home() / ".local/share"
+    return root / "last" / "last.db"
+
+
+def connect_database() -> sqlite3.Connection:
+    path = database_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    database = sqlite3.connect(path)
+    database.row_factory = sqlite3.Row
+    try:
+        database.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                note TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_events_name_occurred_at
+            ON events(name, occurred_at DESC);
+            """
+        )
+        database.commit()
+    except Exception:
+        database.close()
+        raise
+    return database
+
+
+def current_timestamp() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def event_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "type": "event",
+        "id": row["id"],
+        "name": row["name"],
+        "occurred_at": row["occurred_at"],
+        "note": row["note"],
+    }
+
+
+def emit_json(record: dict[str, Any]) -> None:
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+
+
+def rows_for_activity(
+    database: sqlite3.Connection, name: str
+) -> list[sqlite3.Row]:
+    return database.execute(
+        """
+        SELECT id, name, occurred_at, note
+        FROM events
+        WHERE name = ?
+        ORDER BY occurred_at DESC, rowid DESC
+        """,
+        (name,),
+    ).fetchall()
+
+
+def local_date(timestamp: str):
+    return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone().date()
+
+
+def add_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    event = {
+        "id": str(uuid4()),
+        "name": args.name,
+        "occurred_at": current_timestamp(),
+        "note": None,
+    }
+    database.execute(
+        "INSERT INTO events (id, name, occurred_at, note) VALUES (?, ?, ?, ?)",
+        (event["id"], event["name"], event["occurred_at"], event["note"]),
+    )
+    database.commit()
+    if args.jsonl:
+        emit_json(event_record(event))
+    return 0
+
+
+def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    rows = rows_for_activity(database, args.name)
+    if not rows:
+        raise ActivityNotFound(args.name)
+
+    latest = rows[0]
+    previous = rows[1] if len(rows) > 1 else None
+    interval = (
+        (local_date(latest["occurred_at"]) - local_date(previous["occurred_at"])).days
+        if previous
+        else None
+    )
+    if args.jsonl:
+        emit_json(
+            {
+                "schema_version": 1,
+                "type": "summary",
+                "name": args.name,
+                "last": latest["occurred_at"],
+                "previous": previous["occurred_at"] if previous else None,
+                "interval_days": interval,
+                "occurrences": len(rows),
+            }
+        )
+        return 0
+
+    print(args.name)
+    print(f"Last: {local_date(latest['occurred_at']).isoformat()}")
+    print(
+        f"Previous: {local_date(previous['occurred_at']).isoformat()}"
+        if previous
+        else "Previous: -"
+    )
+    print(f"Interval: {interval} days" if interval is not None else "Interval: -")
+    print(f"Occurrences: {len(rows)}")
+    return 0
+
+
+def show_history(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    rows = rows_for_activity(database, args.name)
+    if not rows:
+        raise ActivityNotFound(args.name)
+    for row in rows:
+        if args.jsonl:
+            emit_json(event_record(row))
+        else:
+            print(local_date(row["occurred_at"]).isoformat())
+    return 0
+
+
+def list_activities(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    rows = database.execute(
+        "SELECT DISTINCT name FROM events ORDER BY name COLLATE BINARY"
+    ).fetchall()
+    for row in rows:
+        if args.jsonl:
+            emit_json(
+                {"schema_version": 1, "type": "activity", "name": row["name"]}
+            )
+        else:
+            print(row["name"])
+    return 0
+
+
+def silence_broken_pipe() -> None:
+    try:
+        stdout = sys.stdout.fileno()
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, stdout)
+        finally:
+            os.close(devnull)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def run(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    database = connect_database()
+    try:
+        return args.handler(database, args)
+    finally:
+        database.close()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        return run(argv)
+    except BrokenPipeError:
+        silence_broken_pipe()
+        return 0
+    except ActivityNotFound as error:
+        print(f"lastdone: activity not found: {error}", file=sys.stderr)
+        return 1
+    except (OSError, sqlite3.Error) as error:
+        print(f"lastdone: storage error: {error}", file=sys.stderr)
+        return 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

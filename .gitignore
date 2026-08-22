@@ -1,2 +1,6 @@
 # Planning documents
 PLAN.md
+
+# Python
+__pycache__/
+*.py[cod]
