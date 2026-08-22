@@ -345,7 +345,15 @@ Suggested default location:
 ~/.local/share/last/last.db
 ```
 
-Configuration could follow XDG conventions where available.
+The command-line option `--db PATH` should override `LASTDONE_DB`, which should
+override `XDG_DATA_HOME`; the suggested default remains the final fallback.
+Empty environment values do not select a path. A configuration file is not
+needed for one setting.
+
+Connections should wait a bounded five seconds for a concurrent writer. Keep
+write transactions short, choose migrations only after acquiring the write
+lock, and report an expired lock wait as a storage error that advises retrying.
+Normal output must not reveal the selected path.
 
 The database should remain an implementation detail. The CLI is the stable interface.
 

@@ -8,10 +8,10 @@ may gain optional detail later; the JSONL record meanings change only with a
 ## Invocation
 
 ```text
-lastdone add NAME [--date YYYY-MM-DD] [--jsonl]
-lastdone show NAME [--jsonl]
-lastdone history NAME [--jsonl]
-lastdone list [--jsonl]
+lastdone [--db PATH] add NAME [--date YYYY-MM-DD] [--jsonl]
+lastdone [--db PATH] show NAME [--jsonl]
+lastdone [--db PATH] history NAME [--jsonl]
+lastdone [--db PATH] list [--jsonl]
 lastdone --help
 lastdone --version
 ```
@@ -21,8 +21,9 @@ normalize or restrict names. The activity-key proposal will define a stricter
 grammar.
 
 `--date` accepts only a real ISO 8601 calendar date in `YYYY-MM-DD` form. Future
-dates are invalid because `lastdone` records completed actions. Options not shown
-above are invalid; `--note`, `set`, and `due` remain outside this contract.
+dates are invalid because `lastdone` records completed actions. The global
+`--db` option must appear before the command. Options not shown above are
+invalid; `--note`, `set`, and `due` remain outside this contract.
 
 ## Common behavior
 
@@ -36,10 +37,23 @@ above are invalid; `--note`, `set`, and `due` remain outside this contract.
 - A closed stdout pipe is a successful early consumer exit: return 0 and do not
   print a traceback or diagnostic.
 
-The default database is `$XDG_DATA_HOME/last/last.db`. When `XDG_DATA_HOME` is
-unset or empty, it is `~/.local/share/last/last.db`. The parent directory and
-database are created on first use. On POSIX systems the app directory is mode
-0700 and the database is mode 0600.
+The database path is selected in this order:
+
+1. `--db PATH`;
+2. a non-empty `LASTDONE_DB` environment variable;
+3. `$XDG_DATA_HOME/last/last.db` when `XDG_DATA_HOME` is non-empty;
+4. `~/.local/share/last/last.db`.
+
+Tildes are expanded. Relative paths are resolved by SQLite from the process's
+working directory. The selected path is never added to normal human or JSONL
+output. The parent directory and database are created on first use. On POSIX
+systems the app directory is mode 0700 and the database is mode 0600.
+
+SQLite connections wait up to five seconds for a competing writer. Insert
+transactions are committed immediately, and migration selection occurs while
+holding the write lock so concurrent first runs cannot apply the same migration.
+If the timeout expires, the command returns 3 with a storage diagnostic that
+identifies the busy database and advises retrying.
 
 The database schema uses `PRAGMA user_version`; the current schema version is 1.
 Migrations run forward in numbered transactions before the requested command.
@@ -151,7 +165,7 @@ Help returns 0, writes usage text to stdout, and writes nothing to stderr.
 Version returns 0 and writes exactly:
 
 ```text
-lastdone 0.3.0
+lastdone 0.4.0
 ```
 
 ## Exit codes
