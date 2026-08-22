@@ -46,8 +46,9 @@ The database path is selected in this order:
 
 Tildes are expanded. Relative paths are resolved by SQLite from the process's
 working directory. The selected path is never added to normal human or JSONL
-output. The parent directory and database are created on first use. On POSIX
-systems the app directory is mode 0700 and the database is mode 0600.
+output. Missing parent directories and the database are created on first use.
+On POSIX systems a newly created leaf directory is mode 0700 and the database is
+mode 0600; an existing custom directory keeps its permissions.
 
 SQLite connections wait up to five seconds for a competing writer. Insert
 transactions are committed immediately, and migration selection occurs while

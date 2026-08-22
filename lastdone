@@ -290,8 +290,6 @@ def apply_migrations(database: sqlite3.Connection, path: Path) -> None:
 
 def prepare_storage(path: Path) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if os.name == "posix":
-        os.chmod(path.parent, 0o700)
 
 
 def connect_database(path: Path) -> sqlite3.Connection:

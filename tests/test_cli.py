@@ -126,6 +126,21 @@ class CliContractTests(unittest.TestCase):
             (fallback_home / ".local" / "share" / "last" / "last.db").is_file()
         )
 
+        if os.name == "posix":
+            shared_directory = self.data_home / "shared"
+            shared_directory.mkdir(mode=0o755)
+            os.chmod(shared_directory, 0o755)
+            shared_result = self.run_cli(
+                "--db",
+                str(shared_directory / "last.db"),
+                "list",
+                environment=environment,
+            )
+            self.assertEqual(0, shared_result.returncode, shared_result.stderr)
+            self.assertEqual(
+                0o755, stat.S_IMODE(shared_directory.stat().st_mode)
+            )
+
     def test_empty_list_and_missing_activity(self) -> None:
         for arguments in (("list",), ("list", "--jsonl")):
             with self.subTest(arguments=arguments):
