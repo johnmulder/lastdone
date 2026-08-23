@@ -281,6 +281,8 @@ id
 name
 occurred_at or occurred_on
 note
+reading_value
+reading_unit
 ```
 
 Example:
@@ -289,11 +291,17 @@ Example:
 {
   "id": "01K...",
   "name": "furnace-filter",
-  "occurred_at": "2026-08-21T20:32:00Z",
+  "occurred_at": "2026-08-21T20:32:00.000000Z",
   "occurred_on": null,
-  "note": "MERV 11"
+  "note": "MERV 11",
+  "reading_value": "84221.5",
+  "reading_unit": "mi"
 }
 ```
+
+The reading fields are optional and paired. A reading is one non-negative
+canonical decimal string plus one exact lowercase ASCII unit. Exact unit
+equality permits a change calculation; the tool does not convert measurements.
 
 ### Activity metadata
 
@@ -383,6 +391,12 @@ interactively, and are never used as lookup keys. Imports preserve printable
 legacy deviations so migration cannot silently merge or rewrite user data;
 `doctor` reports invalid stored keys and non-NFC human text.
 
+One event may carry one cumulative reading as canonical decimal text and an
+exact unit. Interactive capture rejects a chronological decrease unless the user
+explicitly confirms a meter reset or rollover. Summary output compares only the
+nearest older effective reading with the same unit. Readings do not affect
+calendar-day due calculations.
+
 ---
 
 ## Suggested Schema
@@ -396,6 +410,8 @@ CREATE TABLE events (
     occurred_at TEXT,
     occurred_on TEXT,
     note TEXT,
+    reading_value TEXT,
+    reading_unit TEXT,
     CONSTRAINT events_occurrence_exactly_one CHECK (
         (occurred_at IS NOT NULL) <> (occurred_on IS NOT NULL)
     ),
@@ -423,6 +439,29 @@ CREATE TABLE events (
                 date(occurred_on, '+0 days') = occurred_on,
                 0
             )
+        )
+    ),
+    CONSTRAINT events_reading_valid CHECK (
+        (reading_value IS NULL AND reading_unit IS NULL) OR (
+            typeof(reading_value) = 'text'
+            AND length(reading_value) > 0
+            AND reading_value NOT GLOB '*[^0-9.]*'
+            AND reading_value NOT LIKE '.%'
+            AND reading_value NOT LIKE '%.'
+            AND reading_value NOT LIKE '%.%.%'
+            AND (
+                reading_value = '0'
+                OR reading_value NOT GLOB '0[0-9]*'
+            )
+            AND (
+                instr(reading_value, '.') = 0
+                OR substr(reading_value, -1) <> '0'
+            )
+            AND typeof(reading_unit) = 'text'
+            AND reading_unit GLOB '[a-z]*'
+            AND reading_unit NOT GLOB '*[^a-z0-9-]*'
+            AND reading_unit NOT LIKE '%-'
+            AND reading_unit NOT LIKE '%--%'
         )
     )
 );
@@ -617,6 +656,7 @@ Plus:
 lastdone set KEY --every INTERVAL
 lastdone due
 lastdone add KEY --date DATE
+lastdone add KEY --reading VALUEUNIT
 lastdone add KEY --note TEXT
 ```
 
