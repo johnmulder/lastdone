@@ -625,13 +625,19 @@ def activity_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 
 def interchange_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    return {"record_version": 2, "type": "event", **event_values(row)}
+    return {"record_version": 3, "type": "event", **event_values(row)}
 
 
 def correction_interchange_record(
     row: sqlite3.Row | dict[str, Any],
 ) -> dict[str, Any]:
-    return {"record_version": 2, "type": "correction", **correction_values(row)}
+    return {"record_version": 3, "type": "correction", **correction_values(row)}
+
+
+def activity_interchange_record(
+    row: sqlite3.Row | dict[str, Any],
+) -> dict[str, Any]:
+    return {"record_version": 3, "type": "activity", **activity_values(row)}
 
 
 def emit_json(record: dict[str, Any]) -> None:
@@ -1061,6 +1067,15 @@ def export_events(database: sqlite3.Connection, args: argparse.Namespace) -> int
     )
     for correction in corrections:
         emit_json(correction_interchange_record(correction))
+    activities = database.execute(
+        """
+        SELECT name, expected_interval_days
+        FROM activities
+        ORDER BY name COLLATE BINARY
+        """
+    )
+    for activity in activities:
+        emit_json(activity_interchange_record(activity))
     return 0
 
 
@@ -1090,7 +1105,7 @@ def parse_event_import_record(
         raise InvalidImport(f"line {line_number}: expected event record fields")
     if (
         type(record["record_version"]) is not int
-        or record["record_version"] not in (1, 2)
+        or record["record_version"] not in (1, 2, 3)
     ):
         raise InvalidImport(f"line {line_number}: unsupported record version")
     for field in ("id", "name"):
@@ -1146,7 +1161,10 @@ def parse_correction_import_record(
     }
     if set(record) != fields:
         raise InvalidImport(f"line {line_number}: expected correction record fields")
-    if type(record["record_version"]) is not int or record["record_version"] != 2:
+    if (
+        type(record["record_version"]) is not int
+        or record["record_version"] not in (2, 3)
+    ):
         raise InvalidImport(f"line {line_number}: unsupported record version")
     for field in ("id", "target_id", "reason"):
         value = record[field]
@@ -1183,6 +1201,33 @@ def parse_correction_import_record(
     return correction_values(record)
 
 
+def parse_activity_import_record(
+    record: dict[str, Any], line_number: int
+) -> dict[str, Any]:
+    fields = {"record_version", "type", "name", "expected_interval_days"}
+    if set(record) != fields:
+        raise InvalidImport(f"line {line_number}: expected activity record fields")
+    if type(record["record_version"]) is not int or record["record_version"] != 3:
+        raise InvalidImport(f"line {line_number}: unsupported record version")
+    name = record["name"]
+    if not isinstance(name, str) or not name:
+        raise InvalidImport(f"line {line_number}: name must be a non-empty string")
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidImport(f"line {line_number}: text must be valid UTF-8") from None
+    interval = record["expected_interval_days"]
+    if (
+        type(interval) is not int
+        or interval <= 0
+        or interval > SQLITE_MAX_INTEGER
+    ):
+        raise InvalidImport(
+            f"line {line_number}: expected_interval_days must be a positive integer"
+        )
+    return activity_values(record)
+
+
 def parse_import_record(
     line: str, line_number: int
 ) -> tuple[str, dict[str, Any]]:
@@ -1197,6 +1242,8 @@ def parse_import_record(
         return record_type, parse_event_import_record(record, line_number)
     if record_type == "correction":
         return record_type, parse_correction_import_record(record, line_number)
+    if record_type == "activity":
+        return record_type, parse_activity_import_record(record, line_number)
     raise InvalidImport(f"line {line_number}: unsupported record type")
 
 
@@ -1298,6 +1345,34 @@ def import_correction_record(
         raise InvalidImport(f"line {line_number}: invalid correction") from None
 
 
+def import_activity_record(
+    database: sqlite3.Connection,
+    activity: dict[str, Any],
+    line_number: int,
+) -> None:
+    existing = database.execute(
+        """
+        SELECT name, expected_interval_days
+        FROM activities
+        WHERE name = ?
+        """,
+        (activity["name"],),
+    ).fetchone()
+    if existing is not None:
+        if activity_values(existing) != activity:
+            raise InvalidImport(
+                f"line {line_number}: name conflicts with existing activity"
+            )
+        return
+    database.execute(
+        """
+        INSERT INTO activities (name, expected_interval_days)
+        VALUES (?, ?)
+        """,
+        (activity["name"], activity["expected_interval_days"]),
+    )
+
+
 def import_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     line_number = 0
     database.execute("BEGIN IMMEDIATE")
@@ -1306,8 +1381,10 @@ def import_events(database: sqlite3.Connection, args: argparse.Namespace) -> int
             record_type, record = parse_import_record(line, line_number)
             if record_type == "event":
                 import_event_record(database, record, line_number)
-            else:
+            elif record_type == "correction":
                 import_correction_record(database, record, line_number)
+            else:
+                import_activity_record(database, record, line_number)
         database.commit()
     except UnicodeError:
         database.rollback()
@@ -1356,6 +1433,7 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
 
         events: int | None = 0
         corrections: int | None = 0
+        activities: int | None = 0
         try:
             rows = database.execute(
                 """
@@ -1381,6 +1459,19 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
                     correction_interchange_record(row), ensure_ascii=False
                 )
                 parse_import_record(encoded, events + corrections)
+            activity_rows = database.execute(
+                """
+                SELECT name, expected_interval_days
+                FROM activities
+                ORDER BY name COLLATE BINARY
+                """
+            )
+            for row in activity_rows:
+                activities += 1
+                encoded = json.dumps(
+                    activity_interchange_record(row), ensure_ascii=False
+                )
+                parse_import_record(encoded, events + corrections + activities)
             foreign_key_problem = database.execute(
                 "PRAGMA foreign_key_check"
             ).fetchone()
@@ -1390,6 +1481,7 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
         except (InvalidImport, sqlite3.Error, TypeError, UnicodeError) as error:
             events = None
             corrections = None
+            activities = None
             parseability = str(error)
 
         checks = (schema, integrity, permissions, parseability)
@@ -1409,6 +1501,7 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
             "parseability": parseability,
             "events": events,
             "corrections": corrections,
+            "activities": activities,
             "status": status,
         }
         if args.jsonl:
@@ -1423,6 +1516,9 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
             print(
                 "Corrections: "
                 f"{corrections if corrections is not None else '-'}"
+            )
+            print(
+                f"Activities: {activities if activities is not None else '-'}"
             )
             print(f"Status: {status}")
         return 0 if status == "ok" else 3

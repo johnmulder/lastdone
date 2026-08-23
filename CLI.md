@@ -101,7 +101,7 @@ Produced by `add --jsonl` and once per occurrence by `history --jsonl`:
 - Exactly one of `occurred_at` and `occurred_on` is non-null.
 - `occurred_at` is an RFC 3339 UTC instant with six fractional digits and `Z`.
 - `occurred_on` is an ISO 8601 calendar date with no implied time or timezone.
-- `note` is always null in version 2 because notes are not yet accepted.
+- `add` sets `note` to null; replacement and imported events may contain text.
 
 ### Summary
 
@@ -317,7 +317,8 @@ invalid field or link rolls back the entire import and returns 2 with a diagnost
 that begins `lastdone: import error: line N:`. Corrections must follow their
 target and replacement events. Version 1 event-only and version 2 event and
 correction streams remain valid. Activity metadata is accepted in version 3
-streams and is idempotent by name.
+streams and is idempotent by name; a different interval for an existing name is
+a conflict that rolls back the stream.
 
 ### `doctor`
 

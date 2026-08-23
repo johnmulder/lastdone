@@ -255,7 +255,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual("", exported.stderr)
         records = [json.loads(line) for line in exported.stdout.splitlines()]
         self.assertEqual([instant["id"], dated["id"]], [r["id"] for r in records])
-        self.assertTrue(all(record["record_version"] == 2 for record in records))
+        self.assertTrue(all(record["record_version"] == 3 for record in records))
         self.assertTrue(all("schema_version" not in record for record in records))
         self.assertEqual("line one\nline two — café", records[1]["note"])
 
@@ -307,19 +307,22 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual(0, voided.returncode, voided.stderr)
         void_correction = json.loads(voided.stdout)
+        configured = self.run_cli("set", "renamed", "--every", "90d")
+        self.assertEqual(0, configured.returncode, configured.stderr)
 
         exported = self.run_cli("export", "--jsonl")
         self.assertEqual(0, exported.returncode, exported.stderr)
         records = [json.loads(line) for line in exported.stdout.splitlines()]
         self.assertEqual(
-            ["event", "event", "correction", "correction"],
+            ["event", "event", "correction", "correction", "activity"],
             [record["type"] for record in records],
         )
-        self.assertTrue(all(record["record_version"] == 2 for record in records))
+        self.assertTrue(all(record["record_version"] == 3 for record in records))
         self.assertEqual(
             [replacement["id"], void_correction["id"]],
-            [record["id"] for record in records[2:]],
+            [record["id"] for record in records[2:4]],
         )
+        self.assertEqual(90, records[4]["expected_interval_days"])
 
         target_path = self.data_home / "correction-round-trip" / "last.db"
         target_arguments = ("--db", str(target_path))
@@ -341,7 +344,9 @@ class CliContractTests(unittest.TestCase):
             input_text=exported.stdout,
         )
         self.assertEqual(0, repeated.returncode, repeated.stderr)
-        self.assertEqual("", self.run_cli(*target_arguments, "list").stdout)
+        self.assertEqual(
+            "renamed\n", self.run_cli(*target_arguments, "list").stdout
+        )
         audit = self.run_cli(
             *target_arguments,
             "history",
@@ -359,6 +364,7 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual(2, doctor["events"])
         self.assertEqual(2, doctor["corrections"])
+        self.assertEqual(1, doctor["activities"])
 
     def test_import_requires_events_before_valid_corrections(self) -> None:
         event = {
@@ -409,6 +415,39 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual(2, conflict.returncode)
         self.assertIn("event already has a correction", conflict.stderr)
+        self.assertEqual(
+            baseline, self.run_cli(*arguments, "export", "--jsonl").stdout
+        )
+
+    def test_import_activity_is_idempotent_and_rejects_conflicts(self) -> None:
+        activity = {
+            "record_version": 3,
+            "type": "activity",
+            "name": "filter",
+            "expected_interval_days": 90,
+        }
+        database_path = self.data_home / "activity-import" / "last.db"
+        arguments = ("--db", str(database_path))
+        stream = f"{json.dumps(activity)}\n"
+        first = self.run_cli(
+            *arguments, "import", "--jsonl", input_text=stream
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        baseline = self.run_cli(*arguments, "export", "--jsonl").stdout
+        self.assertEqual(activity, json.loads(baseline))
+        repeated = self.run_cli(
+            *arguments, "import", "--jsonl", input_text=stream
+        )
+        self.assertEqual(0, repeated.returncode, repeated.stderr)
+
+        conflict = self.run_cli(
+            *arguments,
+            "import",
+            "--jsonl",
+            input_text=f"{json.dumps({**activity, 'expected_interval_days': 30})}\n",
+        )
+        self.assertEqual(2, conflict.returncode)
+        self.assertIn("name conflicts with existing activity", conflict.stderr)
         self.assertEqual(
             baseline, self.run_cli(*arguments, "export", "--jsonl").stdout
         )
@@ -470,7 +509,7 @@ class CliContractTests(unittest.TestCase):
         invalid_records = (
             "",
             "[" * 2_000 + "]" * 2_000,
-            json.dumps({**base, "record_version": 3}),
+            json.dumps({**base, "record_version": 4}),
             json.dumps({**base, "occurred_at": "2024-02-29T00:00:00.000000Z"}),
             json.dumps({**base, "occurred_on": "2026-02-29"}),
             json.dumps({key: value for key, value in base.items() if key != "note"}),
@@ -537,6 +576,42 @@ class CliContractTests(unittest.TestCase):
                 self.assertEqual(2, result.returncode)
                 self.assertTrue(result.stderr.startswith("lastdone: import error:"))
 
+        activity = {
+            "record_version": 3,
+            "type": "activity",
+            "name": "filter",
+            "expected_interval_days": 90,
+        }
+        invalid_activities = (
+            {**activity, "record_version": 2},
+            {**activity, "name": ""},
+            {**activity, "expected_interval_days": True},
+            {**activity, "expected_interval_days": 0},
+            {**activity, "expected_interval_days": -1},
+            {**activity, "expected_interval_days": 1.5},
+            {**activity, "expected_interval_days": 9223372036854775808},
+            {**activity, "extra": None},
+            {
+                key: value
+                for key, value in activity.items()
+                if key != "expected_interval_days"
+            },
+        )
+        for index, record in enumerate(invalid_activities):
+            with self.subTest(activity=index):
+                database_path = (
+                    self.data_home / f"invalid-activity-{index}" / "last.db"
+                )
+                result = self.run_cli(
+                    "--db",
+                    str(database_path),
+                    "import",
+                    "--jsonl",
+                    input_text=f"{json.dumps(record)}\n",
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertTrue(result.stderr.startswith("lastdone: import error:"))
+
     def test_doctor_reports_health_without_mutating_database(self) -> None:
         self.add_json("instant")
         self.add_json("dated", "--date", "2024-02-29")
@@ -550,7 +625,10 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("Schema: ok\n", human.stdout)
         self.assertIn("Integrity: ok\n", human.stdout)
         self.assertIn("Parseability: ok\n", human.stdout)
-        self.assertIn("Events: 2\nCorrections: 0\nStatus: ok\n", human.stdout)
+        self.assertIn(
+            "Events: 2\nCorrections: 0\nActivities: 0\nStatus: ok\n",
+            human.stdout,
+        )
 
         machine = self.run_cli("doctor", "--jsonl")
         self.assertEqual(0, machine.returncode, machine.stderr)
@@ -567,6 +645,7 @@ class CliContractTests(unittest.TestCase):
                 "parseability": "ok",
                 "events": 2,
                 "corrections": 0,
+                "activities": 0,
                 "status": "ok",
             },
             json.loads(machine.stdout),
@@ -613,6 +692,7 @@ class CliContractTests(unittest.TestCase):
         self.assertNotEqual("ok", report["parseability"])
         self.assertIsNone(report["events"])
         self.assertIsNone(report["corrections"])
+        self.assertIsNone(report["activities"])
         self.assertEqual("problems", report["status"])
         self.assertEqual(before, database_path.read_bytes())
         self.assertFalse(database_path.with_name("last.db.v0.bak").exists())
@@ -1422,6 +1502,7 @@ class CliContractTests(unittest.TestCase):
         self.assertNotEqual("ok", report["parseability"])
         self.assertIsNone(report["events"])
         self.assertIsNone(report["corrections"])
+        self.assertIsNone(report["activities"])
         self.assertEqual("problems", report["status"])
 
         result = self.run_cli("list")
@@ -1451,6 +1532,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual("foreign key check failed", report["parseability"])
         self.assertIsNone(report["events"])
         self.assertIsNone(report["corrections"])
+        self.assertIsNone(report["activities"])
 
         result = self.run_cli("list")
         self.assertEqual(3, result.returncode)
