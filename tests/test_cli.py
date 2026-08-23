@@ -59,7 +59,7 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.7.0\n", version.stdout)
+        self.assertEqual("lastdone 0.8.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
@@ -95,6 +95,8 @@ class CliContractTests(unittest.TestCase):
             ("replace", "event"),
             ("replace", "event", "--reason", "reason", "--note", "line\nbreak"),
             ("set", "name"),
+            ("set", "name", "--display-name", ""),
+            ("set", "name", "--display-name", "line\nbreak"),
             ("set", "name", "--every", "0d"),
             ("set", "name", "--every", "01d"),
             ("set", "name", "--every", "+1d"),
@@ -105,6 +107,24 @@ class CliContractTests(unittest.TestCase):
             ("set", "name", "--every", "١d"),
             ("set", "name", "--every", "9223372036854775808d"),
             ("due", "unexpected"),
+            ("add", "Uppercase"),
+            ("add", "éclair"),
+            ("add", "-leading"),
+            ("add", "trailing-"),
+            ("add", "two--hyphens"),
+            ("add", "under_score"),
+            ("add", "white space"),
+            ("show", "éclair"),
+            ("history", "Uppercase"),
+            ("set", "éclair", "--every", "1d"),
+            (
+                "replace",
+                "event",
+                "--reason",
+                "reason",
+                "--name",
+                "Uppercase",
+            ),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_cli(*arguments)
@@ -767,6 +787,7 @@ class CliContractTests(unittest.TestCase):
                 "schema_version": 2,
                 "type": "summary",
                 "name": "furnace-filter",
+                "display_name": None,
                 "last": {
                     "occurred_at": second["occurred_at"],
                     "occurred_on": None,
@@ -1623,6 +1644,7 @@ class CliContractTests(unittest.TestCase):
                 "type": "activity",
                 "name": "filter",
                 "expected_interval_days": 90,
+                "display_name": None,
             },
             listed,
         )
@@ -1640,6 +1662,68 @@ class CliContractTests(unittest.TestCase):
                     "SELECT name, expected_interval_days FROM activities"
                 ).fetchall(),
             )
+
+    def test_display_name_is_normalized_and_used_in_human_output(self) -> None:
+        decomposed = "Cafe\u0301 🏠 תחזוקה"
+        normalized = "Café 🏠 תחזוקה"
+        configured = self.run_cli(
+            "set",
+            "coffee-clean",
+            "--display-name",
+            decomposed,
+            "--jsonl",
+        )
+        self.assertEqual(0, configured.returncode, configured.stderr)
+        record = json.loads(configured.stdout)
+        self.assertEqual(normalized, record["display_name"])
+        self.assertIsNone(record["expected_interval_days"])
+        self.assertEqual(
+            f"coffee-clean  {normalized}\n", self.run_cli("list").stdout
+        )
+        self.assertEqual(
+            normalized,
+            json.loads(self.run_cli("list", "--jsonl").stdout)["display_name"],
+        )
+        self.assertEqual("", self.run_cli("due", "--jsonl").stdout)
+
+        event = self.run_cli("add", "coffee-clean", "--date", "2026-08-20")
+        self.assertEqual(0, event.returncode, event.stderr)
+        human = self.run_cli("show", "coffee-clean")
+        self.assertTrue(human.stdout.startswith(f"{normalized} [coffee-clean]\n"))
+        summary = json.loads(
+            self.run_cli("show", "coffee-clean", "--jsonl").stdout
+        )
+        self.assertEqual(normalized, summary["display_name"])
+
+        interval = self.run_cli(
+            "set", "coffee-clean", "--every", "30d", "--jsonl"
+        )
+        self.assertEqual(0, interval.returncode, interval.stderr)
+        updated = json.loads(interval.stdout)
+        self.assertEqual(30, updated["expected_interval_days"])
+        self.assertEqual(normalized, updated["display_name"])
+        due = json.loads(self.run_cli("due", "--jsonl").stdout)
+        self.assertEqual(normalized, due["display_name"])
+        self.assertIn(
+            f"coffee-clean  {normalized}  ", self.run_cli("due").stdout
+        )
+
+    def test_replacement_human_text_is_normalized_to_nfc(self) -> None:
+        original = self.add_json("normalize", "--date", "2026-08-20")
+        replaced = self.run_cli(
+            "replace",
+            str(original["id"]),
+            "--reason",
+            "re\u0301ason",
+            "--note",
+            "Cafe\u0301",
+            "--jsonl",
+        )
+        self.assertEqual(0, replaced.returncode, replaced.stderr)
+        correction = json.loads(replaced.stdout)
+        self.assertEqual("réason", correction["reason"])
+        history = json.loads(self.run_cli("history", "normalize", "--jsonl").stdout)
+        self.assertEqual("Café", history["note"])
 
     def test_due_reports_all_states_and_filters_only_overdue(self) -> None:
         intervals = {
@@ -1702,7 +1786,7 @@ class CliContractTests(unittest.TestCase):
             status = RUN(("due",), now=now, path=database_path)
         self.assertEqual(0, status)
         self.assertIn(
-            "never  -  7d  -  NEVER-RECORDED\n", human.getvalue()
+            "never  -  -  7d  -  NEVER-RECORDED\n", human.getvalue()
         )
         overdue = io.StringIO()
         with redirect_stdout(overdue):
@@ -1809,7 +1893,7 @@ class CliContractTests(unittest.TestCase):
         self.assertIsNone(record["due_on"])
 
     def test_list_is_distinct_and_ordered_by_utf8_bytes(self) -> None:
-        names = ["zeta", "alpha", "Alpha", "éclair", "alpha"]
+        names = ["zeta", "alpha", "alpha-2", "eclair", "alpha"]
         for name in names:
             result = self.run_cli("add", name)
             self.assertEqual(0, result.returncode, result.stderr)
@@ -1826,6 +1910,7 @@ class CliContractTests(unittest.TestCase):
             all(
                 record["schema_version"] == 2 and record["type"] == "activity"
                 and record["expected_interval_days"] is None
+                and record["display_name"] is None
                 for record in records
             )
         )

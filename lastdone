@@ -11,12 +11,13 @@ from pathlib import Path
 import sqlite3
 import stat
 import sys
+import unicodedata
 from datetime import date, datetime, timezone
 from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 SCHEMA_VERSION = 4
 BUSY_TIMEOUT_SECONDS = 5.0
 SQLITE_MAX_INTEGER = 2**63 - 1
@@ -38,6 +39,10 @@ class InvalidCorrection(Exception):
     """Raised when a correction request is incomplete."""
 
 
+class InvalidActivityUpdate(Exception):
+    """Raised when an activity metadata update is incomplete."""
+
+
 class InvalidImport(Exception):
     """Raised when an interchange record cannot be imported."""
 
@@ -47,9 +52,22 @@ class ArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"lastdone: error: {message}\n")
 
 
-def activity_name(value: str) -> str:
-    if not value or not value.isprintable():
-        raise argparse.ArgumentTypeError("NAME must be non-empty printable text")
+def valid_activity_key(value: str) -> bool:
+    parts = value.split("-")
+    return bool(value) and all(
+        part
+        and part.isascii()
+        and part.isalnum()
+        and part == part.lower()
+        for part in parts
+    )
+
+
+def activity_key(value: str) -> str:
+    if not valid_activity_key(value):
+        raise argparse.ArgumentTypeError(
+            "KEY must use lowercase ASCII letters, digits, and internal hyphens"
+        )
     return value
 
 
@@ -62,13 +80,19 @@ def event_id(value: str) -> str:
 def correction_reason(value: str) -> str:
     if not value or not value.isprintable():
         raise argparse.ArgumentTypeError("TEXT must be non-empty printable text")
-    return value
+    return unicodedata.normalize("NFC", value)
 
 
 def replacement_note(value: str) -> str:
     if any(not character.isprintable() for character in value):
         raise argparse.ArgumentTypeError("TEXT must be printable text")
-    return value
+    return unicodedata.normalize("NFC", value)
+
+
+def display_name(value: str) -> str:
+    if not value or not value.isprintable():
+        raise argparse.ArgumentTypeError("TEXT must be non-empty printable text")
+    return unicodedata.normalize("NFC", value)
 
 
 def expanded_path(value: str) -> Path:
@@ -137,7 +161,7 @@ def parse_args(
     commands = parser.add_subparsers(dest="command", required=True)
 
     add = commands.add_parser("add", help="record an activity")
-    add.add_argument("name", type=activity_name, metavar="NAME")
+    add.add_argument("name", type=activity_key, metavar="KEY")
     add.add_argument(
         "--date",
         type=partial(calendar_date, today=today),
@@ -148,12 +172,12 @@ def parse_args(
     add.set_defaults(handler=add_event)
 
     show = commands.add_parser("show", help="show an activity summary")
-    show.add_argument("name", type=activity_name, metavar="NAME")
+    show.add_argument("name", type=activity_key, metavar="KEY")
     show.add_argument("--jsonl", action="store_true", help="emit JSONL")
     show.set_defaults(handler=show_activity)
 
     history = commands.add_parser("history", help="show full activity history")
-    history.add_argument("name", type=activity_name, metavar="NAME")
+    history.add_argument("name", type=activity_key, metavar="KEY")
     history.add_argument(
         "--include-corrections",
         action="store_true",
@@ -183,7 +207,7 @@ def parse_args(
     )
     replace.add_argument(
         "--name",
-        type=activity_name,
+        type=activity_key,
         default=argparse.SUPPRESS,
         metavar="NAME",
     )
@@ -204,13 +228,19 @@ def parse_args(
     replace.set_defaults(handler=replace_event)
 
     set_command = commands.add_parser("set", help="set an expected interval")
-    set_command.add_argument("name", type=activity_name, metavar="NAME")
+    set_command.add_argument("name", type=activity_key, metavar="KEY")
     set_command.add_argument(
         "--every",
         type=day_interval,
         dest="expected_interval_days",
-        required=True,
+        default=argparse.SUPPRESS,
         metavar="INTERVAL",
+    )
+    set_command.add_argument(
+        "--display-name",
+        type=display_name,
+        default=argparse.SUPPRESS,
+        metavar="TEXT",
     )
     set_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
     set_command.set_defaults(handler=set_interval)
@@ -669,7 +699,12 @@ def activity_values(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 
 def activity_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    return {"schema_version": 2, "type": "activity", **activity_values(row)}
+    return {
+        "schema_version": 2,
+        "type": "activity",
+        **activity_values(row),
+        "display_name": row["display_name"],
+    }
 
 
 def interchange_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -885,12 +920,18 @@ def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int
         if previous
         else None
     )
+    metadata = database.execute(
+        "SELECT display_name FROM activities WHERE name = ?",
+        (args.name,),
+    ).fetchone()
+    configured_display_name = metadata["display_name"] if metadata else None
     if args.jsonl:
         emit_json(
             {
                 "schema_version": 2,
                 "type": "summary",
                 "name": args.name,
+                "display_name": configured_display_name,
                 "last": occurrence_record(latest),
                 "previous": occurrence_record(previous) if previous else None,
                 "interval_days": interval,
@@ -899,7 +940,11 @@ def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int
         )
         return 0
 
-    print(args.name)
+    print(
+        f"{configured_display_name} [{args.name}]"
+        if configured_display_name
+        else args.name
+    )
     print(f"Last: {occurrence_date(latest).isoformat()}")
     print(
         f"Previous: {occurrence_date(previous).isoformat()}"
@@ -996,7 +1041,8 @@ def list_activities(database: sqlite3.Connection, args: argparse.Namespace) -> i
             UNION
             SELECT name FROM activities
         )
-        SELECT names.name, activities.expected_interval_days
+        SELECT names.name, activities.expected_interval_days,
+               activities.display_name
         FROM names
         LEFT JOIN activities ON activities.name = names.name
         ORDER BY names.name COLLATE BINARY
@@ -1006,21 +1052,48 @@ def list_activities(database: sqlite3.Connection, args: argparse.Namespace) -> i
         if args.jsonl:
             emit_json(activity_record(row))
         else:
-            print(row["name"])
+            print(
+                f"{row['name']}  {row['display_name']}"
+                if row["display_name"]
+                else row["name"]
+            )
     return 0
 
 
 def set_interval(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    fields = ("expected_interval_days", "display_name")
+    if not any(hasattr(args, field) for field in fields):
+        raise InvalidActivityUpdate(
+            "set requires at least one of --every or --display-name"
+        )
+    existing = database.execute(
+        """
+        SELECT name, expected_interval_days, display_name
+        FROM activities
+        WHERE name = ?
+        """,
+        (args.name,),
+    ).fetchone()
     activity = {
         "name": args.name,
-        "expected_interval_days": args.expected_interval_days,
+        "expected_interval_days": (
+            args.expected_interval_days
+            if hasattr(args, "expected_interval_days")
+            else existing["expected_interval_days"] if existing else None
+        ),
+        "display_name": (
+            args.display_name
+            if hasattr(args, "display_name")
+            else existing["display_name"] if existing else None
+        ),
     }
     database.execute(
         """
-        INSERT INTO activities (name, expected_interval_days)
-        VALUES (?, ?)
+        INSERT INTO activities (name, expected_interval_days, display_name)
+        VALUES (?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
-            expected_interval_days = excluded.expected_interval_days
+            expected_interval_days = excluded.expected_interval_days,
+            display_name = excluded.display_name
         """,
         tuple(activity.values()),
     )
@@ -1062,6 +1135,7 @@ def due_record(
         "schema_version": 2,
         "type": "due",
         **activity_values(activity),
+        "display_name": activity["display_name"],
         "last": last,
         "due_on": due_on,
         "state": state,
@@ -1071,8 +1145,9 @@ def due_record(
 def show_due(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     activities = database.execute(
         """
-        SELECT name, expected_interval_days
+        SELECT name, expected_interval_days, display_name
         FROM activities
+        WHERE expected_interval_days IS NOT NULL
         ORDER BY name COLLATE BINARY
         """
     )
@@ -1089,7 +1164,8 @@ def show_due(database: sqlite3.Connection, args: argparse.Namespace) -> int:
                 else "-"
             )
             print(
-                f"{record['name']}  {last_date}  "
+                f"{record['name']}  {activity['display_name'] or '-'}  "
+                f"{last_date}  "
                 f"{record['expected_interval_days']}d  "
                 f"{record['due_on'] or '-'}  {record['state'].upper()}"
             )
@@ -1635,6 +1711,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"lastdone: event already corrected: {error}", file=sys.stderr)
         return 1
     except InvalidCorrection as error:
+        print(f"lastdone: error: {error}", file=sys.stderr)
+        return 2
+    except InvalidActivityUpdate as error:
         print(f"lastdone: error: {error}", file=sys.stderr)
         return 2
     except InvalidImport as error:
