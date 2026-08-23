@@ -17,7 +17,7 @@ from uuid import uuid4
 
 
 VERSION = "0.5.0"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_SECONDS = 5.0
 
 
@@ -183,8 +183,57 @@ def create_events_table(database: sqlite3.Connection) -> None:
     )
 
 
+def create_corrections_table(database: sqlite3.Connection) -> None:
+    database.execute(
+        """
+        CREATE TABLE corrections (
+            id TEXT NOT NULL PRIMARY KEY
+                CONSTRAINT corrections_id_nonempty CHECK (length(id) > 0),
+            kind TEXT NOT NULL
+                CONSTRAINT corrections_kind_valid
+                CHECK (kind IN ('void', 'replace')),
+            target_id TEXT NOT NULL
+                CONSTRAINT corrections_target_unique UNIQUE
+                REFERENCES events(id),
+            replacement_id TEXT
+                CONSTRAINT corrections_replacement_unique UNIQUE
+                REFERENCES events(id),
+            reason TEXT NOT NULL
+                CONSTRAINT corrections_reason_nonempty CHECK (length(reason) > 0),
+            corrected_at TEXT NOT NULL
+                CONSTRAINT corrections_corrected_at_valid CHECK (
+                    length(corrected_at) = 27
+                    AND corrected_at GLOB (
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T' ||
+                        '[0-9][0-9]:[0-9][0-9]:[0-9][0-9].' ||
+                        '[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+                    )
+                    AND coalesce(
+                        datetime(substr(corrected_at, 1, 19), '+0 seconds') =
+                            replace(substr(corrected_at, 1, 19), 'T', ' '),
+                        0
+                    )
+                ),
+            CONSTRAINT corrections_relationship_valid CHECK (
+                (kind = 'void' AND replacement_id IS NULL)
+                OR (kind = 'replace' AND replacement_id IS NOT NULL)
+            ),
+            CONSTRAINT corrections_distinct_events CHECK (
+                replacement_id IS NULL OR target_id <> replacement_id
+            )
+        )
+        """
+    )
+
+
 def table_columns(database: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(row["name"] for row in database.execute("PRAGMA table_info(events)"))
+
+
+def correction_columns(database: sqlite3.Connection) -> tuple[str, ...]:
+    return tuple(
+        row["name"] for row in database.execute("PRAGMA table_info(corrections)")
+    )
 
 
 def migrate_to_version_1(database: sqlite3.Connection) -> None:
@@ -218,7 +267,11 @@ def migrate_to_version_1(database: sqlite3.Connection) -> None:
     database.execute("CREATE INDEX idx_events_name ON events(name)")
 
 
-MIGRATIONS = (migrate_to_version_1,)
+def migrate_to_version_2(database: sqlite3.Connection) -> None:
+    create_corrections_table(database)
+
+
+MIGRATIONS = (migrate_to_version_1, migrate_to_version_2)
 
 
 def database_schema_version(database: sqlite3.Connection) -> int:
@@ -268,6 +321,32 @@ def validate_schema_structure(database: sqlite3.Connection) -> None:
     }
     if "idx_events_name" not in indexes:
         raise sqlite3.DatabaseError("database schema does not match its version")
+    expected_correction_columns = (
+        "id",
+        "kind",
+        "target_id",
+        "replacement_id",
+        "reason",
+        "corrected_at",
+    )
+    if correction_columns(database) != expected_correction_columns:
+        raise sqlite3.DatabaseError("database schema does not match its version")
+    correction_sql_row = database.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'corrections'"
+    ).fetchone()
+    correction_sql = correction_sql_row["sql"] if correction_sql_row else ""
+    correction_markers = (
+        "corrections_id_nonempty",
+        "corrections_kind_valid",
+        "corrections_target_unique",
+        "corrections_replacement_unique",
+        "corrections_reason_nonempty",
+        "corrections_corrected_at_valid",
+        "corrections_relationship_valid",
+        "corrections_distinct_events",
+    )
+    if any(marker not in correction_sql for marker in correction_markers):
+        raise sqlite3.DatabaseError("database schema does not match its version")
 
 
 def validate_schema(database: sqlite3.Connection) -> None:
@@ -275,6 +354,9 @@ def validate_schema(database: sqlite3.Connection) -> None:
     integrity = database.execute("PRAGMA integrity_check(1)").fetchone()[0]
     if integrity != "ok":
         raise sqlite3.DatabaseError(f"database integrity check failed: {integrity}")
+    foreign_key_problem = database.execute("PRAGMA foreign_key_check").fetchone()
+    if foreign_key_problem is not None:
+        raise sqlite3.DatabaseError("database foreign key check failed")
 
 
 def apply_migrations(database: sqlite3.Connection, path: Path) -> None:
@@ -317,6 +399,7 @@ def connect_database(path: Path) -> sqlite3.Connection:
     prepare_storage(path)
     database = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
     database.row_factory = sqlite3.Row
+    database.execute("PRAGMA foreign_keys = ON")
     try:
         apply_migrations(database, path)
         if os.name == "posix":
@@ -335,6 +418,7 @@ def connect_read_only(path: Path) -> tuple[Path, sqlite3.Connection]:
         timeout=BUSY_TIMEOUT_SECONDS,
     )
     database.row_factory = sqlite3.Row
+    database.execute("PRAGMA foreign_keys = ON")
     return resolved, database
 
 

@@ -182,8 +182,12 @@ class CliContractTests(unittest.TestCase):
             table_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'events'"
             ).fetchone()[0]
-        self.assertEqual(1, version)
+            correction_sql = database.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'corrections'"
+            ).fetchone()[0]
+        self.assertEqual(2, version)
         self.assertIn("events_occurred_at_valid", table_sql)
+        self.assertIn("corrections_relationship_valid", correction_sql)
 
         second = self.run_cli("list")
         self.assertEqual(0, second.returncode, second.stderr)
@@ -361,7 +365,7 @@ class CliContractTests(unittest.TestCase):
                 "schema_version": 2,
                 "type": "doctor",
                 "database": str(database_path.resolve()),
-                "database_schema_version": 1,
+                "database_schema_version": 2,
                 "schema": "ok",
                 "integrity": "ok",
                 "permissions": "ok" if os.name == "posix" else "not-applicable",
@@ -660,6 +664,102 @@ class CliContractTests(unittest.TestCase):
                         )
                     database.rollback()
 
+    def test_schema_rejects_invalid_corrections(self) -> None:
+        self.assertEqual(0, self.run_cli("list").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        timestamp = "2026-01-01T00:00:00.000000Z"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute("PRAGMA foreign_keys = ON")
+            database.executemany(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES (?, 'name', ?, NULL, NULL)
+                """,
+                (
+                    ("target", timestamp),
+                    ("replacement", timestamp),
+                    ("second-target", timestamp),
+                ),
+            )
+            database.commit()
+            invalid_corrections = (
+                ("", "void", "target", None, "reason", timestamp),
+                ("kind", "edit", "target", None, "reason", timestamp),
+                ("void-link", "void", "target", "replacement", "reason", timestamp),
+                ("replace-no-link", "replace", "target", None, "reason", timestamp),
+                ("same", "replace", "target", "target", "reason", timestamp),
+                ("empty-reason", "void", "target", None, "", timestamp),
+                ("bad-time", "void", "target", None, "reason", "2026-01-01"),
+                ("missing", "void", "missing", None, "reason", timestamp),
+            )
+            for correction in invalid_corrections:
+                with self.subTest(correction=correction):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        database.execute(
+                            """
+                            INSERT INTO corrections
+                                (id, kind, target_id, replacement_id, reason,
+                                 corrected_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            correction,
+                        )
+                    database.rollback()
+
+            database.execute(
+                """
+                INSERT INTO corrections
+                    (id, kind, target_id, replacement_id, reason, corrected_at)
+                VALUES ('valid', 'replace', 'target', 'replacement', 'reason', ?)
+                """,
+                (timestamp,),
+            )
+            database.commit()
+            for correction in (
+                ("same-target", "void", "target", None, "reason", timestamp),
+                (
+                    "same-replacement",
+                    "replace",
+                    "second-target",
+                    "replacement",
+                    "reason",
+                    timestamp,
+                ),
+            ):
+                with self.subTest(correction=correction):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        database.execute(
+                            """
+                            INSERT INTO corrections
+                                (id, kind, target_id, replacement_id, reason,
+                                 corrected_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            correction,
+                        )
+                    database.rollback()
+
+    def test_version_one_database_adds_corrections_without_changing_events(self) -> None:
+        event = self.add_json("preserved", "--date", "2024-02-29")
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute("DROP TABLE corrections")
+            database.execute("PRAGMA user_version = 1")
+            database.commit()
+
+        result = self.run_cli("history", "preserved", "--jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(event, json.loads(result.stdout))
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(
+                2, database.execute("PRAGMA user_version").fetchone()[0]
+            )
+            self.assertIsNotNone(
+                database.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = 'corrections'"
+                ).fetchone()
+            )
+
     def test_legacy_database_migrates_without_changing_instant(self) -> None:
         database_path = self.data_home / "last" / "last.db"
         database_path.parent.mkdir(parents=True)
@@ -731,7 +831,7 @@ class CliContractTests(unittest.TestCase):
             table_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'events'"
             ).fetchone()[0]
-        self.assertEqual(1, version)
+        self.assertEqual(2, version)
         self.assertIn("occurred_on", columns)
         self.assertIn("idx_events_name", indexes)
         self.assertNotIn("idx_events_name_occurred_at", indexes)
@@ -767,7 +867,7 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(database_path.with_name("last.db.v0.bak").is_file())
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                1, database.execute("PRAGMA user_version").fetchone()[0]
+                2, database.execute("PRAGMA user_version").fetchone()[0]
             )
 
     def test_invalid_legacy_data_rolls_back_and_keeps_backup(self) -> None:
