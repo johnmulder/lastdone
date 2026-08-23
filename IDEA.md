@@ -727,7 +727,11 @@ That implies common conventions across tools for:
 - version reporting;
 - error formatting.
 
-`last` can serve as the reference implementation for those conventions.
+`last` serves as the reference implementation through the copyable
+[personal-OS convention pack](conventions/v1/SPEC.md). The pack contains a
+small specification and concrete input/output fixtures rather than a shared
+runtime library, so sibling commands can test the same edges while remaining
+independent.
 
 ---
 

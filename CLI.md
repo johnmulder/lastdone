@@ -5,6 +5,10 @@ the `last` project's `lastdone` executable. Human output may gain optional
 detail later; the JSONL record meanings change only with a `schema_version`
 change.
 
+The copyable [personal-OS convention pack](conventions/v1/SPEC.md) extracts the
+shared encoding, framing, time, stream, diagnostic, and exit-status rules from
+this command-specific contract. Its version is independent of this CLI version.
+
 ## Invocation
 
 ```text
