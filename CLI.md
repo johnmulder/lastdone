@@ -10,8 +10,11 @@ may gain optional detail later; the JSONL record meanings change only with a
 ```text
 lastdone [--db PATH] add NAME [--date YYYY-MM-DD] [--jsonl]
 lastdone [--db PATH] show NAME [--jsonl]
-lastdone [--db PATH] history NAME [--jsonl]
+lastdone [--db PATH] history NAME [--include-corrections] [--jsonl]
 lastdone [--db PATH] list [--jsonl]
+lastdone [--db PATH] void EVENT_ID --reason TEXT [--jsonl]
+lastdone [--db PATH] replace EVENT_ID --reason TEXT
+         [--name NAME] [--date YYYY-MM-DD] [--note TEXT] [--jsonl]
 lastdone [--db PATH] export --jsonl
 lastdone [--db PATH] import --jsonl
 lastdone [--db PATH] doctor [--jsonl]
@@ -24,9 +27,11 @@ normalize or restrict names. The activity-key proposal will define a stricter
 grammar.
 
 `--date` accepts only a real ISO 8601 calendar date in `YYYY-MM-DD` form. Future
-dates are invalid because `lastdone` records completed actions. The global
-`--db` option must appear before the command. Options not shown above are
-invalid; `--note`, `set`, and `due` remain outside this contract.
+dates are invalid because `lastdone` records completed actions. `EVENT_ID` and
+correction reasons are non-empty printable text. Replacement notes are printable
+text and may be empty. The global `--db` option must appear before the command.
+Options not shown above are invalid; `add --note`, `set`, and `due` remain outside
+this contract.
 
 ## Common behavior
 
@@ -63,7 +68,7 @@ holding the write lock so concurrent first runs cannot apply the same migration.
 If the timeout expires, the command returns 3 with a storage diagnostic that
 identifies the busy database and advises retrying.
 
-The database schema uses `PRAGMA user_version`; the current schema version is 1.
+The database schema uses `PRAGMA user_version`; the current schema version is 2.
 Migrations run forward in numbered transactions before the requested command.
 Before rebuilding an existing unversioned database, `lastdone` creates
 `last.db.v0.bak` with mode 0600 and never overwrites it. A newer schema version,
@@ -78,7 +83,7 @@ Every record contains:
 {"schema_version":2,"type":"..."}
 ```
 
-Version 2 has four record types.
+Version 2 has five record types.
 
 ### Event
 
@@ -114,34 +119,54 @@ Produced once per distinct name by `list --jsonl`:
 {"schema_version":2,"type":"activity","name":"furnace-filter"}
 ```
 
+### Correction
+
+Produced by `void --jsonl`, `replace --jsonl`, and correction-inclusive machine
+history:
+
+```json
+{"schema_version":2,"type":"correction","id":"c8f8c768-7b2d-4985-a080-b58a94d3933c","kind":"replace","target_id":"550e8400-e29b-41d4-a716-446655440000","replacement_id":"ee481866-5e5f-4fc2-b6d1-a2f0e4d60cec","reason":"wrong date","corrected_at":"2026-08-22T18:00:00.000000Z"}
+```
+
+`kind` is `void` or `replace`. A void has a null `replacement_id`; a replacement
+references its newly appended event. Reasons are non-empty and `corrected_at` is
+an RFC 3339 UTC instant with six fractional digits.
+
 ### Doctor
 
 Produced once by `doctor --jsonl`:
 
 ```json
-{"schema_version":2,"type":"doctor","database":"/home/me/.local/share/last/last.db","database_schema_version":1,"schema":"ok","integrity":"ok","permissions":"ok","parseability":"ok","events":5,"status":"ok"}
+{"schema_version":2,"type":"doctor","database":"/home/me/.local/share/last/last.db","database_schema_version":2,"schema":"ok","integrity":"ok","permissions":"ok","parseability":"ok","events":5,"corrections":1,"status":"ok"}
 ```
 
 `status` is `ok` only when every applicable check passes. On non-POSIX systems,
-`permissions` is `not-applicable`. `database_schema_version` or `events` is null
-when that value cannot be read safely.
+`permissions` is `not-applicable`. `database_schema_version`, `events`, or
+`corrections` is null when that value cannot be read safely.
 
 Adding a field is backward-compatible. Removing a field, renaming a field, or
 changing a field's meaning requires a new `schema_version`.
 
 ## Interchange records
 
-`export --jsonl` and `import --jsonl` use a separate, lossless record format:
+`export --jsonl` emits lossless record version 2:
 
 ```json
-{"record_version":1,"type":"event","id":"550e8400-e29b-41d4-a716-446655440000","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null,"note":null}
+{"record_version":2,"type":"event","id":"550e8400-e29b-41d4-a716-446655440000","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null,"note":null}
+{"record_version":2,"type":"correction","id":"c8f8c768-7b2d-4985-a080-b58a94d3933c","kind":"replace","target_id":"550e8400-e29b-41d4-a716-446655440000","replacement_id":"ee481866-5e5f-4fc2-b6d1-a2f0e4d60cec","reason":"wrong date","corrected_at":"2026-08-22T18:00:00.000000Z"}
 ```
 
-Version 1 requires exactly those seven fields. `id` and `name` are non-empty
-strings; `note` is a string or null. Exactly one occurrence field is populated.
-An exact timestamp has six fractional digits and `Z`; a calendar date is a real
-date in `YYYY-MM-DD` form. Interchange versions are independent of command-result
-`schema_version` values and SQLite column or schema versions.
+Version 2 event records require the same seven fields as version 1 event records;
+only `record_version` changes. `id` and `name` are non-empty strings; `note` is a
+string or null. Exactly one occurrence field is populated. An exact timestamp
+has six fractional digits and `Z`; a calendar date is real `YYYY-MM-DD`.
+
+Version 2 correction records require exactly the eight fields shown. IDs and
+reasons are non-empty strings, timestamps use the exact event timestamp form,
+and kind/link combinations follow the command-result correction rules. Events
+must precede corrections that reference them. Import continues to accept version
+1 event records. Interchange versions are independent of command-result
+`schema_version` values and SQLite schema versions.
 
 ## Commands
 
@@ -169,6 +194,8 @@ Occurrences: 5
 For one event, the `Previous` and `Interval` values are `-`. Exact instants are
 rendered in the process's local timezone; date-only events render their stored
 date unchanged. JSONL mode emits one summary record that preserves both kinds.
+Corrected targets never contribute to the summary; their effective replacements
+do.
 
 A missing activity returns 1 and writes this diagnostic:
 
@@ -178,10 +205,16 @@ lastdone: activity not found: furnace-filter
 
 ### `history`
 
-Human mode emits one occurrence date per line. JSONL mode emits one event record
-per line. Both modes order by displayed calendar date, newest first. Exact
-instants precede date-only events on the same date; otherwise-equal events use
-most recent insertion first.
+By default, human mode emits `EVENT_ID  DATE` per effective event and JSONL mode
+emits one effective event record per line. Both order by displayed calendar date,
+newest first. Exact instants precede date-only events on the same date;
+otherwise-equal events use most recent insertion first.
+
+`--include-corrections` emits all events stored under `NAME`, including corrected
+targets, plus events directly linked to them by corrections. Events use insertion
+order, followed by the directly related corrections in correction order. Human
+audit lines begin with `event` or `correction`; JSONL uses the event and
+correction records above.
 
 A missing activity has the same behavior as missing `show` output.
 
@@ -191,13 +224,33 @@ Human mode emits one distinct activity name per line. JSONL mode emits one
 activity record per line. Names are ordered by their UTF-8 byte values. Duplicate
 events never duplicate a list entry.
 
+Only effective events contribute names. Replacing an activity with a new name
+removes the old name when no other effective event uses it.
+
 An empty database is successful and emits no output in either mode.
+
+### `void`
+
+`void EVENT_ID --reason TEXT` appends a correction that removes one effective
+event from normal queries without deleting it. Human mode is silent; JSONL emits
+the correction record. A missing event or an event already corrected returns 1.
+
+### `replace`
+
+`replace EVENT_ID --reason TEXT` appends a new event and a correction linking the
+target to it in one transaction. At least one of `--name`, `--date`, or `--note`
+is required; unspecified values preserve the target. `--date` changes the
+occurrence to date-only precision. Human mode is silent; JSONL emits the
+correction record. A missing or already-corrected target returns 1.
+
+A replacement is itself an ordinary effective event and can later be corrected
+using its own ID. Corrections cannot be changed or deleted.
 
 ### `export`
 
-`export --jsonl` writes one interchange event record per line, oldest insertion
-first. It streams directly from SQLite and includes every durable event field.
-An empty database emits no output successfully.
+`export --jsonl` writes every interchange version 2 event oldest-insertion first,
+then every correction in correction order. It streams directly from SQLite and
+includes every durable field. An empty database emits no output successfully.
 
 ### `import`
 
@@ -205,16 +258,17 @@ An empty database emits no output successfully.
 silent on success. It validates and applies the stream in one transaction
 without loading it into memory. An existing identical ID is a no-op. An ID with
 different content, malformed JSON, blank line, unsupported record version, or
-invalid field rolls back the entire import and returns 2 with a diagnostic that
-begins `lastdone: import error: line N:`.
+invalid field or link rolls back the entire import and returns 2 with a diagnostic
+that begins `lastdone: import error: line N:`. Corrections must follow their
+target and replacement events. Version 1 event-only streams remain valid.
 
 ### `doctor`
 
 `doctor` opens the selected database read-only and never creates, migrates, or
 repairs it. It reports the absolute database path, schema version and structure,
-SQLite integrity, database-file permissions, event parseability, event count,
-and overall status. Human output uses one labeled line per value; `--jsonl`
-emits the doctor record above.
+SQLite integrity, database-file permissions, event and correction parseability,
+event and correction counts, and overall status. Human output uses one labeled
+line per value; `--jsonl` emits the doctor record above.
 
 A healthy report returns 0. A completed report with problems returns 3. A
 missing or inaccessible database is a storage error, returns 3, emits no report,
@@ -226,7 +280,7 @@ Help returns 0, writes usage text to stdout, and writes nothing to stderr.
 Version returns 0 and writes exactly:
 
 ```text
-lastdone 0.5.0
+lastdone 0.6.0
 ```
 
 ## Exit codes
@@ -234,15 +288,15 @@ lastdone 0.5.0
 | Code | Meaning |
 | ---: | --- |
 | 0 | Success, including an empty list or closed output pipe |
-| 1 | Named activity not found |
-| 2 | Invalid command, option, name, argument count, or import stream |
+| 1 | Named activity/event not found, or event already corrected |
+| 2 | Invalid command, option, value, argument count, or import stream |
 | 3 | Storage or configuration failure |
 
 Exit codes do not encode ordinary data states.
 
 ## Error stability
 
-The missing-activity diagnostic above is stable. Invalid-argument and storage
-diagnostic wording is not a machine interface, but each diagnostic begins with
-`lastdone:` and contains no Python traceback. Programs should branch on exit
-codes, not parse those messages.
+Missing-activity, missing-event, and already-corrected diagnostics begin with
+`lastdone:`. Other invalid-argument and storage wording is not a machine
+interface, but every diagnostic has that prefix and no Python traceback.
+Programs should branch on exit codes, not parse those messages.

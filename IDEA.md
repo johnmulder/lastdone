@@ -364,6 +364,12 @@ error. A read-only `doctor` command should report the selected path, schema,
 integrity, permissions, and event parseability without creating or migrating a
 database.
 
+Corrections should remain append-only. A void links to one event and removes it
+from effective queries; a replacement links that event to one new ordinary
+event. Store a reason and UTC correction timestamp for both. Default summaries,
+histories, lists, and future due calculations should use only events that are not
+correction targets.
+
 ---
 
 ## Suggested Schema
@@ -410,6 +416,40 @@ CREATE TABLE events (
 
 CREATE INDEX idx_events_name
 ON events(name);
+
+CREATE TABLE corrections (
+    id TEXT NOT NULL PRIMARY KEY
+        CONSTRAINT corrections_id_nonempty CHECK (length(id) > 0),
+    kind TEXT NOT NULL
+        CONSTRAINT corrections_kind_valid CHECK (kind IN ('void', 'replace')),
+    target_id TEXT NOT NULL UNIQUE
+        REFERENCES events(id),
+    replacement_id TEXT UNIQUE
+        REFERENCES events(id),
+    reason TEXT NOT NULL
+        CONSTRAINT corrections_reason_nonempty CHECK (length(reason) > 0),
+    corrected_at TEXT NOT NULL
+        CONSTRAINT corrections_corrected_at_valid CHECK (
+            length(corrected_at) = 27
+            AND corrected_at GLOB (
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T' ||
+                '[0-9][0-9]:[0-9][0-9]:[0-9][0-9].' ||
+                '[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+            )
+            AND coalesce(
+                datetime(substr(corrected_at, 1, 19), '+0 seconds') =
+                    replace(substr(corrected_at, 1, 19), 'T', ' '),
+                0
+            )
+        ),
+    CONSTRAINT corrections_relationship_valid CHECK (
+        (kind = 'void' AND replacement_id IS NULL) OR
+        (kind = 'replace' AND replacement_id IS NOT NULL)
+    ),
+    CONSTRAINT corrections_distinct_events CHECK (
+        replacement_id IS NULL OR target_id <> replacement_id
+    )
+);
 
 CREATE TABLE activities (
     name TEXT PRIMARY KEY,
