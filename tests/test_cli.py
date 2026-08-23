@@ -192,9 +192,13 @@ class CliContractTests(unittest.TestCase):
             correction_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'corrections'"
             ).fetchone()[0]
-        self.assertEqual(2, version)
+            activity_sql = database.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'activities'"
+            ).fetchone()[0]
+        self.assertEqual(3, version)
         self.assertIn("events_occurred_at_valid", table_sql)
         self.assertIn("corrections_relationship_valid", correction_sql)
+        self.assertIn("activities_interval_positive", activity_sql)
 
         second = self.run_cli("list")
         self.assertEqual(0, second.returncode, second.stderr)
@@ -543,7 +547,7 @@ class CliContractTests(unittest.TestCase):
                 "schema_version": 2,
                 "type": "doctor",
                 "database": str(database_path.resolve()),
-                "database_schema_version": 2,
+                "database_schema_version": 3,
                 "schema": "ok",
                 "integrity": "ok",
                 "permissions": "ok" if os.name == "posix" else "not-applicable",
@@ -1004,6 +1008,31 @@ class CliContractTests(unittest.TestCase):
                         )
                     database.rollback()
 
+    def test_schema_rejects_invalid_activities(self) -> None:
+        self.assertEqual(0, self.run_cli("list").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        invalid_activities = (
+            (None, 1),
+            ("", 1),
+            ("zero", 0),
+            ("negative", -1),
+            ("real", 1.5),
+            ("text", "days"),
+        )
+        with closing(sqlite3.connect(database_path)) as database:
+            for activity in invalid_activities:
+                with self.subTest(activity=activity):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        database.execute(
+                            """
+                            INSERT INTO activities
+                                (name, expected_interval_days)
+                            VALUES (?, ?)
+                            """,
+                            activity,
+                        )
+                    database.rollback()
+
     def test_schema_rejects_invalid_corrections(self) -> None:
         self.assertEqual(0, self.run_cli("list").returncode)
         database_path = self.data_home / "last" / "last.db"
@@ -1085,6 +1114,7 @@ class CliContractTests(unittest.TestCase):
         event = self.add_json("preserved", "--date", "2024-02-29")
         database_path = self.data_home / "last" / "last.db"
         with closing(sqlite3.connect(database_path)) as database:
+            database.execute("DROP TABLE activities")
             database.execute("DROP TABLE corrections")
             database.execute("PRAGMA user_version = 1")
             database.commit()
@@ -1094,12 +1124,50 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(event, json.loads(result.stdout))
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                2, database.execute("PRAGMA user_version").fetchone()[0]
+                3, database.execute("PRAGMA user_version").fetchone()[0]
             )
             self.assertIsNotNone(
                 database.execute(
                     "SELECT sql FROM sqlite_master WHERE name = 'corrections'"
                 ).fetchone()
+            )
+            self.assertIsNotNone(
+                database.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = 'activities'"
+                ).fetchone()
+            )
+
+    def test_version_two_database_adds_activities_without_changing_history(
+        self,
+    ) -> None:
+        event = self.add_json("preserved", "--date", "2024-02-29")
+        correction = self.run_cli(
+            "void", str(event["id"]), "--reason", "duplicate", "--jsonl"
+        )
+        self.assertEqual(0, correction.returncode, correction.stderr)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute("DROP TABLE activities")
+            database.execute("PRAGMA user_version = 2")
+            database.commit()
+
+        result = self.run_cli(
+            "history", "preserved", "--include-corrections", "--jsonl"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        records = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(event, records[0])
+        self.assertEqual(json.loads(correction.stdout), records[1])
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(
+                3, database.execute("PRAGMA user_version").fetchone()[0]
+            )
+            self.assertEqual(
+                1, database.execute("SELECT count(*) FROM events").fetchone()[0]
+            )
+            self.assertEqual(
+                1,
+                database.execute("SELECT count(*) FROM corrections").fetchone()[0],
             )
 
     def test_legacy_database_migrates_without_changing_instant(self) -> None:
@@ -1173,7 +1241,7 @@ class CliContractTests(unittest.TestCase):
             table_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'events'"
             ).fetchone()[0]
-        self.assertEqual(2, version)
+        self.assertEqual(3, version)
         self.assertIn("occurred_on", columns)
         self.assertIn("idx_events_name", indexes)
         self.assertNotIn("idx_events_name_occurred_at", indexes)
@@ -1209,7 +1277,7 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(database_path.with_name("last.db.v0.bak").is_file())
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                2, database.execute("PRAGMA user_version").fetchone()[0]
+                3, database.execute("PRAGMA user_version").fetchone()[0]
             )
 
     def test_invalid_legacy_data_rolls_back_and_keeps_backup(self) -> None:

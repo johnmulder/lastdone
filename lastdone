@@ -17,7 +17,7 @@ from uuid import uuid4
 
 
 VERSION = "0.6.0"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BUSY_TIMEOUT_SECONDS = 5.0
 
 
@@ -302,6 +302,22 @@ def create_corrections_table(database: sqlite3.Connection) -> None:
     )
 
 
+def create_activities_table(database: sqlite3.Connection) -> None:
+    database.execute(
+        """
+        CREATE TABLE activities (
+            name TEXT NOT NULL PRIMARY KEY
+                CONSTRAINT activities_name_nonempty CHECK (length(name) > 0),
+            expected_interval_days INTEGER NOT NULL
+                CONSTRAINT activities_interval_positive CHECK (
+                    typeof(expected_interval_days) = 'integer'
+                    AND expected_interval_days > 0
+                )
+        )
+        """
+    )
+
+
 def table_columns(database: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(row["name"] for row in database.execute("PRAGMA table_info(events)"))
 
@@ -309,6 +325,12 @@ def table_columns(database: sqlite3.Connection) -> tuple[str, ...]:
 def correction_columns(database: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(
         row["name"] for row in database.execute("PRAGMA table_info(corrections)")
+    )
+
+
+def activity_columns(database: sqlite3.Connection) -> tuple[str, ...]:
+    return tuple(
+        row["name"] for row in database.execute("PRAGMA table_info(activities)")
     )
 
 
@@ -347,7 +369,15 @@ def migrate_to_version_2(database: sqlite3.Connection) -> None:
     create_corrections_table(database)
 
 
-MIGRATIONS = (migrate_to_version_1, migrate_to_version_2)
+def migrate_to_version_3(database: sqlite3.Connection) -> None:
+    create_activities_table(database)
+
+
+MIGRATIONS = (
+    migrate_to_version_1,
+    migrate_to_version_2,
+    migrate_to_version_3,
+)
 
 
 def database_schema_version(database: sqlite3.Connection) -> int:
@@ -422,6 +452,18 @@ def validate_schema_structure(database: sqlite3.Connection) -> None:
         "corrections_distinct_events",
     )
     if any(marker not in correction_sql for marker in correction_markers):
+        raise sqlite3.DatabaseError("database schema does not match its version")
+    if activity_columns(database) != ("name", "expected_interval_days"):
+        raise sqlite3.DatabaseError("database schema does not match its version")
+    activity_sql_row = database.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'activities'"
+    ).fetchone()
+    activity_sql = activity_sql_row["sql"] if activity_sql_row else ""
+    activity_markers = (
+        "activities_name_nonempty",
+        "activities_interval_positive",
+    )
+    if any(marker not in activity_sql for marker in activity_markers):
         raise sqlite3.DatabaseError("database schema does not match its version")
 
 
