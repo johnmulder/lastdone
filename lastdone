@@ -18,7 +18,7 @@ from uuid import uuid4
 
 
 VERSION = "0.8.0"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 BUSY_TIMEOUT_SECONDS = 5.0
 SQLITE_MAX_INTEGER = 2**63 - 1
 
@@ -478,11 +478,44 @@ def migrate_to_version_4(database: sqlite3.Connection) -> None:
     database.execute("DROP TABLE activities_legacy")
 
 
+def migrate_to_version_5(database: sqlite3.Connection) -> None:
+    database.execute("ALTER TABLE events ADD COLUMN reading_value TEXT")
+    database.execute(
+        """
+        ALTER TABLE events ADD COLUMN reading_unit TEXT
+            CONSTRAINT events_reading_valid CHECK (
+                (reading_value IS NULL AND reading_unit IS NULL) OR (
+                    typeof(reading_value) = 'text'
+                    AND length(reading_value) > 0
+                    AND reading_value NOT GLOB '*[^0-9.]*'
+                    AND reading_value NOT LIKE '.%'
+                    AND reading_value NOT LIKE '%.'
+                    AND reading_value NOT LIKE '%.%.%'
+                    AND (
+                        reading_value = '0'
+                        OR reading_value NOT GLOB '0[0-9]*'
+                    )
+                    AND (
+                        instr(reading_value, '.') = 0
+                        OR substr(reading_value, -1) <> '0'
+                    )
+                    AND typeof(reading_unit) = 'text'
+                    AND reading_unit GLOB '[a-z]*'
+                    AND reading_unit NOT GLOB '*[^a-z0-9-]*'
+                    AND reading_unit NOT LIKE '%-'
+                    AND reading_unit NOT LIKE '%--%'
+                )
+            )
+        """
+    )
+
+
 MIGRATIONS = (
     migrate_to_version_1,
     migrate_to_version_2,
     migrate_to_version_3,
     migrate_to_version_4,
+    migrate_to_version_5,
 )
 
 
@@ -514,7 +547,15 @@ def backup_before_migration(
 
 
 def validate_schema_structure(database: sqlite3.Connection) -> None:
-    expected_columns = ("id", "name", "occurred_at", "occurred_on", "note")
+    expected_columns = (
+        "id",
+        "name",
+        "occurred_at",
+        "occurred_on",
+        "note",
+        "reading_value",
+        "reading_unit",
+    )
     if table_columns(database) != expected_columns:
         raise sqlite3.DatabaseError("database schema does not match its version")
     table_sql_row = database.execute(
@@ -527,6 +568,7 @@ def validate_schema_structure(database: sqlite3.Connection) -> None:
         "events_occurrence_exactly_one",
         "events_occurred_at_valid",
         "events_occurred_on_valid",
+        "events_reading_valid",
     )
     if any(marker not in table_sql for marker in markers):
         raise sqlite3.DatabaseError("database schema does not match its version")

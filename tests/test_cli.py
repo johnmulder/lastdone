@@ -24,6 +24,11 @@ TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 RUN = runpy.run_path(str(CLI), run_name="lastdone_test")["run"]
 
 
+def remove_reading_columns(database: sqlite3.Connection) -> None:
+    database.execute("ALTER TABLE events DROP COLUMN reading_unit")
+    database.execute("ALTER TABLE events DROP COLUMN reading_value")
+
+
 class CliContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -230,8 +235,9 @@ class CliContractTests(unittest.TestCase):
             activity_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'activities'"
             ).fetchone()[0]
-        self.assertEqual(4, version)
+        self.assertEqual(5, version)
         self.assertIn("events_occurred_at_valid", table_sql)
+        self.assertIn("events_reading_valid", table_sql)
         self.assertIn("corrections_relationship_valid", correction_sql)
         self.assertIn("activities_interval_positive", activity_sql)
         self.assertIn("activities_display_name_nonempty", activity_sql)
@@ -843,7 +849,7 @@ class CliContractTests(unittest.TestCase):
                 "schema_version": 2,
                 "type": "doctor",
                 "database": str(database_path.resolve()),
-                "database_schema_version": 4,
+                "database_schema_version": 5,
                 "schema": "ok",
                 "integrity": "ok",
                 "permissions": "ok" if os.name == "posix" else "not-applicable",
@@ -1309,6 +1315,64 @@ class CliContractTests(unittest.TestCase):
                         )
                     database.rollback()
 
+            invalid_readings = (
+                ("missing-unit", "1", None),
+                ("missing-value", None, "mi"),
+                ("empty-value", "", "mi"),
+                ("leading-zero", "01", "mi"),
+                ("leading-dot", ".1", "mi"),
+                ("trailing-dot", "1.", "mi"),
+                ("two-dots", "1.2.3", "mi"),
+                ("trailing-zero", "1.0", "mi"),
+                ("empty-unit", "1", ""),
+                ("upper-unit", "1", "MI"),
+                ("leading-hyphen", "1", "-mi"),
+                ("trailing-hyphen", "1", "mi-"),
+                ("double-hyphen", "1", "engine--h"),
+            )
+            for event_id, value, unit in invalid_readings:
+                with self.subTest(reading=(value, unit)):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        database.execute(
+                            """
+                            INSERT INTO events
+                                (id, name, occurred_at, occurred_on, note,
+                                 reading_value, reading_unit)
+                            VALUES (?, 'name', ?, NULL, NULL, ?, ?)
+                            """,
+                            (event_id, valid_instant, value, unit),
+                        )
+                    database.rollback()
+
+            database.execute(
+                """
+                INSERT INTO events
+                    (id, name, occurred_at, occurred_on, note,
+                     reading_value, reading_unit)
+                VALUES ('valid-reading', 'name', ?, NULL, NULL, '84221.5', 'mi')
+                """,
+                (valid_instant,),
+            )
+            database.execute(
+                """
+                INSERT INTO events
+                    (id, name, occurred_at, occurred_on, note,
+                     reading_value, reading_unit)
+                VALUES ('coerced-reading', 'name', ?, NULL, NULL, 1, 'mi')
+                """,
+                (valid_instant,),
+            )
+            database.commit()
+            self.assertEqual(
+                ("1", "text"),
+                database.execute(
+                    """
+                    SELECT reading_value, typeof(reading_value)
+                    FROM events WHERE id = 'coerced-reading'
+                    """
+                ).fetchone(),
+            )
+
     def test_schema_rejects_invalid_activities(self) -> None:
         self.assertEqual(0, self.run_cli("list").returncode)
         database_path = self.data_home / "last" / "last.db"
@@ -1417,6 +1481,7 @@ class CliContractTests(unittest.TestCase):
         event = self.add_json("preserved", "--date", "2024-02-29")
         database_path = self.data_home / "last" / "last.db"
         with closing(sqlite3.connect(database_path)) as database:
+            remove_reading_columns(database)
             database.execute("DROP TABLE activities")
             database.execute("DROP TABLE corrections")
             database.execute("PRAGMA user_version = 1")
@@ -1427,7 +1492,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(event, json.loads(result.stdout))
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                4, database.execute("PRAGMA user_version").fetchone()[0]
+                5, database.execute("PRAGMA user_version").fetchone()[0]
             )
             self.assertIsNotNone(
                 database.execute(
@@ -1450,6 +1515,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(0, correction.returncode, correction.stderr)
         database_path = self.data_home / "last" / "last.db"
         with closing(sqlite3.connect(database_path)) as database:
+            remove_reading_columns(database)
             database.execute("DROP TABLE activities")
             database.execute("PRAGMA user_version = 2")
             database.commit()
@@ -1463,7 +1529,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(json.loads(correction.stdout), records[1])
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                4, database.execute("PRAGMA user_version").fetchone()[0]
+                5, database.execute("PRAGMA user_version").fetchone()[0]
             )
             self.assertEqual(
                 1, database.execute("SELECT count(*) FROM events").fetchone()[0]
@@ -1481,6 +1547,7 @@ class CliContractTests(unittest.TestCase):
         )
         database_path = self.data_home / "last" / "last.db"
         with closing(sqlite3.connect(database_path)) as database:
+            remove_reading_columns(database)
             database.executescript(
                 """
                 DROP TABLE activities;
@@ -1510,7 +1577,7 @@ class CliContractTests(unittest.TestCase):
             self.assertEqual(0o600, stat.S_IMODE(backup_path.stat().st_mode))
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                4, database.execute("PRAGMA user_version").fetchone()[0]
+                5, database.execute("PRAGMA user_version").fetchone()[0]
             )
             self.assertEqual(
                 ("preserved", 90, None),
@@ -1538,6 +1605,31 @@ class CliContractTests(unittest.TestCase):
         before = backup_path.read_bytes()
         self.assertEqual(0, self.run_cli("list").returncode)
         self.assertEqual(before, backup_path.read_bytes())
+
+    def test_version_four_migration_adds_null_readings_without_backup(
+        self,
+    ) -> None:
+        event = self.add_json("preserved", "--date", "2024-02-29")
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            remove_reading_columns(database)
+            database.execute("PRAGMA user_version = 4")
+            database.commit()
+
+        result = self.run_cli("history", "preserved", "--jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(event, json.loads(result.stdout))
+        self.assertFalse(database_path.with_name("last.db.v4.bak").exists())
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(
+                5, database.execute("PRAGMA user_version").fetchone()[0]
+            )
+            self.assertEqual(
+                (None, None),
+                database.execute(
+                    "SELECT reading_value, reading_unit FROM events"
+                ).fetchone(),
+            )
 
     def test_legacy_database_migrates_without_changing_instant(self) -> None:
         database_path = self.data_home / "last" / "last.db"
@@ -1610,7 +1702,7 @@ class CliContractTests(unittest.TestCase):
             table_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'events'"
             ).fetchone()[0]
-        self.assertEqual(4, version)
+        self.assertEqual(5, version)
         self.assertIn("occurred_on", columns)
         self.assertIn("idx_events_name", indexes)
         self.assertNotIn("idx_events_name_occurred_at", indexes)
@@ -1646,7 +1738,7 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(database_path.with_name("last.db.v0.bak").is_file())
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                4, database.execute("PRAGMA user_version").fetchone()[0]
+                5, database.execute("PRAGMA user_version").fetchone()[0]
             )
 
     def test_invalid_legacy_data_rolls_back_and_keeps_backup(self) -> None:
