@@ -6,32 +6,7 @@ append-oriented, and Unix-like goals without turning it into a task manager.
 
 ## Immediately after the MVP
 
-### 1. Add explicit correction without erasing history
-
-**Gap**
-
-Low-friction capture guarantees occasional mistakes, yet the append-oriented
-principle does not say how to correct a wrong date, name, or note. Direct SQL
-edits would make history less trustworthy and would not compose with export.
-
-**Approach**
-
-Expose event IDs in history output and support explicit `void` and `replace`
-operations. A replacement is a new event linked to the superseded event; a void
-records that an event should no longer count. Default queries show the effective
-history, with an option to include corrections.
-
-**Implementation considerations**
-
-- Require an event ID, not a fuzzy name-and-date match, for destructive-looking
-  operations.
-- Store the reason and correction timestamp.
-- Keep corrected records in export and machine-readable history.
-- Define whether correcting the newest event changes due calculations; the
-  effective, non-void history should be the single source of truth.
-- Do not build general event sourcing; two explicit relationships are enough.
-
-### 2. Make interval semantics deliberately narrow
+### 1. Make interval semantics deliberately narrow
 
 **Gap**
 
@@ -56,7 +31,7 @@ calendar months only after a real use case justifies separate month arithmetic.
   explicit machine-readable states.
 - Allow a clock/timezone override in tests to cover leap days and DST boundaries.
 
-### 3. Separate stable ASCII keys from human display names
+### 2. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -84,7 +59,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 4. Publish personal-OS conventions as fixtures, not a shared library
+### 3. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -109,7 +84,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 5. Support one structured reading per event
+### 4. Support one structured reading per event
 
 **Gap**
 
@@ -135,7 +110,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 6. Add batch capture through standard input
+### 5. Add batch capture through standard input
 
 **Gap**
 
