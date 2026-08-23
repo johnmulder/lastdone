@@ -270,7 +270,7 @@ class CliContractTests(unittest.TestCase):
         with closing(sqlite3.connect(source_path)) as database:
             database.execute(
                 "UPDATE events SET note = ? WHERE id = ?",
-                ("line one\nline two — café", dated["id"]),
+                ("line one · line two — café", dated["id"]),
             )
             database.commit()
 
@@ -279,9 +279,9 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual("", exported.stderr)
         records = [json.loads(line) for line in exported.stdout.splitlines()]
         self.assertEqual([instant["id"], dated["id"]], [r["id"] for r in records])
-        self.assertTrue(all(record["record_version"] == 3 for record in records))
+        self.assertTrue(all(record["record_version"] == 4 for record in records))
         self.assertTrue(all("schema_version" not in record for record in records))
-        self.assertEqual("line one\nline two — café", records[1]["note"])
+        self.assertEqual("line one · line two — café", records[1]["note"])
 
         target_path = self.data_home / "round-trip" / "last.db"
         target_arguments = ("--db", str(target_path))
@@ -331,7 +331,14 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual(0, voided.returncode, voided.stderr)
         void_correction = json.loads(voided.stdout)
-        configured = self.run_cli("set", "renamed", "--every", "90d")
+        configured = self.run_cli(
+            "set",
+            "renamed",
+            "--every",
+            "90d",
+            "--display-name",
+            "תחזוקה 🧰",
+        )
         self.assertEqual(0, configured.returncode, configured.stderr)
 
         exported = self.run_cli("export", "--jsonl")
@@ -341,12 +348,13 @@ class CliContractTests(unittest.TestCase):
             ["event", "event", "correction", "correction", "activity"],
             [record["type"] for record in records],
         )
-        self.assertTrue(all(record["record_version"] == 3 for record in records))
+        self.assertTrue(all(record["record_version"] == 4 for record in records))
         self.assertEqual(
             [replacement["id"], void_correction["id"]],
             [record["id"] for record in records[2:4]],
         )
         self.assertEqual(90, records[4]["expected_interval_days"])
+        self.assertEqual("תחזוקה 🧰", records[4]["display_name"])
 
         target_path = self.data_home / "correction-round-trip" / "last.db"
         target_arguments = ("--db", str(target_path))
@@ -369,7 +377,8 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual(0, repeated.returncode, repeated.stderr)
         self.assertEqual(
-            "renamed\n", self.run_cli(*target_arguments, "list").stdout
+            "renamed  תחזוקה 🧰\n",
+            self.run_cli(*target_arguments, "list").stdout,
         )
         audit = self.run_cli(
             *target_arguments,
@@ -389,6 +398,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(2, doctor["events"])
         self.assertEqual(2, doctor["corrections"])
         self.assertEqual(1, doctor["activities"])
+        self.assertEqual("ok", doctor["conventions"])
 
     def test_import_requires_events_before_valid_corrections(self) -> None:
         event = {
@@ -458,7 +468,14 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual(0, first.returncode, first.stderr)
         baseline = self.run_cli(*arguments, "export", "--jsonl").stdout
-        self.assertEqual(activity, json.loads(baseline))
+        self.assertEqual(
+            {
+                **activity,
+                "record_version": 4,
+                "display_name": None,
+            },
+            json.loads(baseline),
+        )
         repeated = self.run_cli(
             *arguments, "import", "--jsonl", input_text=stream
         )
@@ -533,9 +550,11 @@ class CliContractTests(unittest.TestCase):
         invalid_records = (
             "",
             "[" * 2_000 + "]" * 2_000,
-            json.dumps({**base, "record_version": 4}),
+            json.dumps({**base, "record_version": 5}),
             json.dumps({**base, "occurred_at": "2024-02-29T00:00:00.000000Z"}),
             json.dumps({**base, "occurred_on": "2026-02-29"}),
+            json.dumps({**base, "name": "event\n"}),
+            json.dumps({**base, "note": "\x00"}),
             json.dumps({key: value for key, value in base.items() if key != "note"}),
             json.dumps({**base, "extra": True}),
         )
@@ -571,6 +590,7 @@ class CliContractTests(unittest.TestCase):
             {**correction, "record_version": 1},
             {**correction, "kind": "edit"},
             {**correction, "reason": ""},
+            {**correction, "reason": "reason\x1b"},
             {**correction, "corrected_at": "2026-01-01"},
             {**correction, "replacement_id": "replacement"},
             {
@@ -620,6 +640,25 @@ class CliContractTests(unittest.TestCase):
                 for key, value in activity.items()
                 if key != "expected_interval_days"
             },
+            {
+                **activity,
+                "record_version": 4,
+                "display_name": "display\n",
+            },
+            {
+                "record_version": 4,
+                "type": "activity",
+                "name": "filter",
+                "expected_interval_days": None,
+                "display_name": None,
+            },
+            {
+                "record_version": 4,
+                "type": "activity",
+                "name": "filter",
+                "expected_interval_days": None,
+                "display_name": "",
+            },
         )
         for index, record in enumerate(invalid_activities):
             with self.subTest(activity=index):
@@ -636,6 +675,68 @@ class CliContractTests(unittest.TestCase):
                 self.assertEqual(2, result.returncode)
                 self.assertTrue(result.stderr.startswith("lastdone: import error:"))
 
+    def test_import_preserves_printable_deviations_for_doctor(self) -> None:
+        name = "Cafe\u0301"
+        event = {
+            "record_version": 4,
+            "type": "event",
+            "id": "event-id",
+            "name": name,
+            "occurred_at": None,
+            "occurred_on": "2024-02-29",
+            "note": "note\u0301",
+        }
+        correction = {
+            "record_version": 4,
+            "type": "correction",
+            "id": "correction-id",
+            "kind": "void",
+            "target_id": "event-id",
+            "replacement_id": None,
+            "reason": "reason\u0301",
+            "corrected_at": "2026-01-01T00:00:00.000000Z",
+        }
+        activity = {
+            "record_version": 4,
+            "type": "activity",
+            "name": name,
+            "expected_interval_days": None,
+            "display_name": "E\u0301lan 🧰",
+        }
+        stream = "".join(
+            f"{json.dumps(record, ensure_ascii=False)}\n"
+            for record in (event, correction, activity)
+        )
+        database_path = self.data_home / "deviations" / "last.db"
+        arguments = ("--db", str(database_path))
+        imported = self.run_cli(
+            *arguments, "import", "--jsonl", input_text=stream
+        )
+        self.assertEqual(0, imported.returncode, imported.stderr)
+        exported = self.run_cli(*arguments, "export", "--jsonl")
+        self.assertEqual(
+            [event, correction, activity],
+            [json.loads(line) for line in exported.stdout.splitlines()],
+        )
+        before = database_path.read_bytes()
+
+        doctor = self.run_cli(*arguments, "doctor", "--jsonl")
+        self.assertEqual(3, doctor.returncode, doctor.stderr)
+        report = json.loads(doctor.stdout)
+        self.assertEqual("ok", report["parseability"])
+        self.assertEqual("problems", report["conventions"])
+        self.assertEqual("problems", report["status"])
+        issues = "\n".join(report["convention_issues"])
+        self.assertIn("invalid activity key", issues)
+        self.assertIn("non-NFC activity key", issues)
+        self.assertIn("non-NFC note", issues)
+        self.assertIn("non-NFC display name", issues)
+        self.assertIn("non-NFC correction reason", issues)
+        self.assertEqual(before, database_path.read_bytes())
+
+        rejected = self.run_cli(*arguments, "show", name)
+        self.assertEqual(2, rejected.returncode)
+
     def test_doctor_reports_health_without_mutating_database(self) -> None:
         self.add_json("instant")
         self.add_json("dated", "--date", "2024-02-29")
@@ -649,6 +750,7 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("Schema: ok\n", human.stdout)
         self.assertIn("Integrity: ok\n", human.stdout)
         self.assertIn("Parseability: ok\n", human.stdout)
+        self.assertIn("Conventions: ok\n", human.stdout)
         self.assertIn(
             "Events: 2\nCorrections: 0\nActivities: 0\nStatus: ok\n",
             human.stdout,
@@ -667,6 +769,8 @@ class CliContractTests(unittest.TestCase):
                 "integrity": "ok",
                 "permissions": "ok" if os.name == "posix" else "not-applicable",
                 "parseability": "ok",
+                "conventions": "ok",
+                "convention_issues": [],
                 "events": 2,
                 "corrections": 0,
                 "activities": 0,
@@ -1675,6 +1779,7 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual(0, configured.returncode, configured.stderr)
         record = json.loads(configured.stdout)
+        self.assertIn(normalized, configured.stdout)
         self.assertEqual(normalized, record["display_name"])
         self.assertIsNone(record["expected_interval_days"])
         self.assertEqual(
