@@ -6,32 +6,7 @@ append-oriented, and Unix-like goals without turning it into a task manager.
 
 ## Immediately after the MVP
 
-### 1. Make interval semantics deliberately narrow
-
-**Gap**
-
-`90d` can mean 90 calendar days or 2,160 elapsed hours, and `3mo` cannot be
-represented reliably as a fixed number of seconds. The proposed
-`expected_interval_seconds` column hides that distinction. Due output is also
-undefined for activities with no events or events dated in the future.
-
-**Approach**
-
-Start with whole calendar days only and store `expected_interval_days` as a
-positive integer. Determine due status from the user's current local date. Add
-calendar months only after a real use case justifies separate month arithmetic.
-
-**Implementation considerations**
-
-- Initially accept a single grammar such as `[1-9][0-9]*d`; reject rather than
-  guess at other units.
-- Define due as `last occurrence date + interval`, and say whether equality means
-  due today or overdue.
-- Represent `never recorded`, `future dated`, `due today`, and `overdue` as
-  explicit machine-readable states.
-- Allow a clock/timezone override in tests to cover leap days and DST boundaries.
-
-### 2. Separate stable ASCII keys from human display names
+### 1. Separate stable ASCII keys from human display names
 
 **Gap**
 
@@ -59,7 +34,7 @@ rewrite a key implicitly.
 - Use a display-width-aware library only if alignment defects become a real
   problem; correctness does not require column-perfect output.
 
-### 3. Publish personal-OS conventions as fixtures, not a shared library
+### 2. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -84,7 +59,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 4. Support one structured reading per event
+### 3. Support one structured reading per event
 
 **Gap**
 
@@ -110,7 +85,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 5. Add batch capture through standard input
+### 4. Add batch capture through standard input
 
 **Gap**
 
