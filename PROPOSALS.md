@@ -6,35 +6,7 @@ append-oriented, and Unix-like goals without turning it into a task manager.
 
 ## Immediately after the MVP
 
-### 1. Separate stable ASCII keys from human display names
-
-**Gap**
-
-ASCII-only activity names are shell-friendly but exclude natural names in many
-languages. Conversely, silently normalizing unrestricted Unicode keys can merge
-distinct names or admit visually confusable identifiers. Notes already need to
-handle Unicode safely even if keys remain ASCII.
-
-**Approach**
-
-Keep an immutable, lowercase ASCII activity key for commands and integration,
-and add an optional Unicode `display_name` for human output. Preserve notes and
-display names as UTF-8 after Unicode NFC normalization; never transliterate or
-rewrite a key implicitly.
-
-**Implementation considerations**
-
-- Define the key grammar explicitly, for example lowercase letters, digits, and
-  internal hyphens with no leading or trailing hyphen.
-- Reject NUL and terminal control characters in all text fields.
-- Let JSON serialization emit valid Unicode and test composed versus decomposed
-  input, combining marks, emoji, and right-to-left text.
-- Make `doctor` report keys imported outside the ASCII contract and Unicode
-  normalization deviations without silently changing them.
-- Use a display-width-aware library only if alignment defects become a real
-  problem; correctness does not require column-perfect output.
-
-### 2. Publish personal-OS conventions as fixtures, not a shared library
+### 1. Publish personal-OS conventions as fixtures, not a shared library
 
 **Gap**
 
@@ -59,7 +31,7 @@ same fixture checks in its own test suite.
 
 ## Usage-driven extensions
 
-### 3. Support one structured reading per event
+### 2. Support one structured reading per event
 
 **Gap**
 
@@ -85,7 +57,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 4. Add batch capture through standard input
+### 3. Add batch capture through standard input
 
 **Gap**
 
