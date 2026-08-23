@@ -77,10 +77,12 @@ share a database merely to share these conventions.
 ## Reference fixtures
 
 `fixtures/events.jsonl` is portable `lastdone` input and expected byte-for-byte
-export output. `fixtures/summary.jsonl`, `fixtures/not-found.stderr`, and
-`fixtures/version.stdout` are expected command outputs. They demonstrate exact
-timestamps, date-only occurrences, common fields, compact framing, Unicode, a
-diagnostic, and independent executable/result/interchange versions.
+export output. `fixtures/summary.jsonl`, the `*.stderr` files, and
+`fixtures/version.stdout` are expected command outputs; `not-a-database.txt` is
+an intentionally invalid storage input. Together they demonstrate exact
+timestamps, date-only occurrences, common fields, compact framing, Unicode,
+diagnostics, all four exit statuses, and independent executable, result, and
+interchange versions.
 
 Projects should copy or publish these files and write a small native test against
 their own command. They should not depend on a shared runtime package or runner.

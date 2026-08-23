@@ -19,6 +19,7 @@ from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "lastdone"
+CONVENTION_FIXTURES = ROOT / "conventions" / "v1" / "fixtures"
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 RUN = runpy.run_path(str(CLI), run_name="lastdone_test")["run"]
 
@@ -308,6 +309,84 @@ class CliContractTests(unittest.TestCase):
             exported.stdout,
             self.run_cli(*target_arguments, "export", "--jsonl").stdout,
         )
+
+    def test_personal_os_convention_fixtures_match_cli(self) -> None:
+        fixture_text: dict[str, str] = {}
+        for name in (
+            "events.jsonl",
+            "invalid.stderr",
+            "not-a-database.txt",
+            "summary.jsonl",
+            "not-found.stderr",
+            "storage.stderr",
+            "version.stdout",
+        ):
+            raw = (CONVENTION_FIXTURES / name).read_bytes()
+            self.assertFalse(raw.startswith(b"\xef\xbb\xbf"), name)
+            self.assertNotIn(b"\r", raw, name)
+            self.assertTrue(raw.endswith(b"\n"), name)
+            fixture_text[name] = raw.decode("utf-8")
+
+        for name in ("events.jsonl", "summary.jsonl"):
+            for line in fixture_text[name].splitlines():
+                record = json.loads(line)
+                self.assertIsInstance(record, dict)
+                self.assertEqual(
+                    line,
+                    json.dumps(
+                        record,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                )
+
+        database_path = self.data_home / "convention-fixtures" / "last.db"
+        arguments = ("--db", str(database_path))
+        imported = self.run_cli(
+            *arguments,
+            "import",
+            "--jsonl",
+            input_text=fixture_text["events.jsonl"],
+        )
+        self.assertEqual(0, imported.returncode, imported.stderr)
+        self.assertEqual("", imported.stdout)
+        self.assertEqual("", imported.stderr)
+        exported = self.run_cli(*arguments, "export", "--jsonl")
+        self.assertEqual(0, exported.returncode, exported.stderr)
+        self.assertEqual("", exported.stderr)
+        self.assertEqual(
+            fixture_text["events.jsonl"],
+            exported.stdout,
+        )
+        summary = self.run_cli(
+            *arguments, "show", "furnace-filter", "--jsonl"
+        )
+        self.assertEqual(0, summary.returncode, summary.stderr)
+        self.assertEqual("", summary.stderr)
+        self.assertEqual(
+            fixture_text["summary.jsonl"],
+            summary.stdout,
+        )
+
+        missing = self.run_cli(*arguments, "show", "missing")
+        self.assertEqual(1, missing.returncode)
+        self.assertEqual("", missing.stdout)
+        self.assertEqual(fixture_text["not-found.stderr"], missing.stderr)
+        invalid = self.run_cli("add", "Uppercase")
+        self.assertEqual(2, invalid.returncode)
+        self.assertEqual("", invalid.stdout)
+        self.assertEqual(fixture_text["invalid.stderr"], invalid.stderr)
+        invalid_database = CONVENTION_FIXTURES / "not-a-database.txt"
+        before = invalid_database.read_bytes()
+        storage = self.run_cli("--db", str(invalid_database), "list")
+        self.assertEqual(3, storage.returncode)
+        self.assertEqual("", storage.stdout)
+        self.assertEqual(fixture_text["storage.stderr"], storage.stderr)
+        self.assertEqual(before, invalid_database.read_bytes())
+        version = self.run_cli("--version")
+        self.assertEqual(0, version.returncode)
+        self.assertEqual(fixture_text["version.stdout"], version.stdout)
+        self.assertEqual("", version.stderr)
 
     def test_export_import_preserves_correction_chains(self) -> None:
         original = self.add_json("original", "--date", "2024-01-01")
