@@ -59,7 +59,7 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.5.0\n", version.stdout)
+        self.assertEqual("lastdone 0.6.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
@@ -69,6 +69,8 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("export", help_result.stdout)
         self.assertIn("import", help_result.stdout)
         self.assertIn("doctor", help_result.stdout)
+        self.assertIn("void", help_result.stdout)
+        self.assertIn("replace", help_result.stdout)
         self.assertEqual("", help_result.stderr)
 
     def test_invalid_input_uses_exit_two_and_stderr(self) -> None:
@@ -85,6 +87,11 @@ class CliContractTests(unittest.TestCase):
             ("list", "--db", "somewhere.db"),
             ("export",),
             ("import",),
+            ("void", ""),
+            ("void", "event"),
+            ("void", "event", "--reason", ""),
+            ("replace", "event"),
+            ("replace", "event", "--reason", "reason", "--note", "line\nbreak"),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_cli(*arguments)
@@ -523,8 +530,168 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(all(item["type"] == "event" for item in history))
 
         human_history = self.run_cli("history", "furnace-filter")
-        self.assertEqual(f"{date}\n{date}\n", human_history.stdout)
+        self.assertEqual(
+            f"{second['id']}  {date}\n{first['id']}  {date}\n",
+            human_history.stdout,
+        )
         self.assertEqual("", human_history.stderr)
+
+    def test_void_excludes_event_but_preserves_audit_history(self) -> None:
+        older = self.add_json("filter", "--date", "2024-01-01")
+        latest = self.add_json("filter", "--date", "2024-02-01")
+
+        result = self.run_cli(
+            "void", str(latest["id"]), "--reason", "duplicate", "--jsonl"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        correction = json.loads(result.stdout)
+        self.assertEqual(2, correction["schema_version"])
+        self.assertEqual("correction", correction["type"])
+        self.assertEqual("void", correction["kind"])
+        self.assertEqual(latest["id"], correction["target_id"])
+        self.assertIsNone(correction["replacement_id"])
+        self.assertEqual("duplicate", correction["reason"])
+        UUID(correction["id"])
+        self.assertRegex(correction["corrected_at"], TIMESTAMP)
+
+        summary = json.loads(self.run_cli("show", "filter", "--jsonl").stdout)
+        self.assertEqual(
+            {"occurred_at": None, "occurred_on": "2024-01-01"},
+            summary["last"],
+        )
+        self.assertEqual(1, summary["occurrences"])
+        history = self.run_cli("history", "filter", "--jsonl")
+        self.assertEqual([older["id"]], [json.loads(history.stdout)["id"]])
+        self.assertEqual("filter\n", self.run_cli("list").stdout)
+
+        audit = self.run_cli(
+            "history", "filter", "--include-corrections", "--jsonl"
+        )
+        audit_records = [json.loads(line) for line in audit.stdout.splitlines()]
+        self.assertEqual(
+            [older["id"], latest["id"]],
+            [record["id"] for record in audit_records[:2]],
+        )
+        self.assertEqual(correction, audit_records[2])
+        human_audit = self.run_cli(
+            "history", "filter", "--include-corrections"
+        )
+        self.assertIn(f"event {latest['id']} 2024-02-01\n", human_audit.stdout)
+        self.assertIn(
+            f"correction {correction['id']} void {latest['id']} - ",
+            human_audit.stdout,
+        )
+
+        repeated = self.run_cli(
+            "void", str(latest["id"]), "--reason", "again"
+        )
+        self.assertEqual(1, repeated.returncode)
+        self.assertIn("event already corrected", repeated.stderr)
+        missing = self.run_cli("void", "missing", "--reason", "unknown ID")
+        self.assertEqual(1, missing.returncode)
+        self.assertIn("event not found: missing", missing.stderr)
+
+        void_last = self.run_cli(
+            "void", str(older["id"]), "--reason", "never happened"
+        )
+        self.assertEqual(0, void_last.returncode, void_last.stderr)
+        self.assertEqual("", self.run_cli("list").stdout)
+        self.assertEqual(1, self.run_cli("show", "filter").returncode)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(
+                2, database.execute("SELECT count(*) FROM events").fetchone()[0]
+            )
+            self.assertEqual(
+                2, database.execute("SELECT count(*) FROM corrections").fetchone()[0]
+            )
+
+    def test_replace_preserves_fields_and_supports_correction_chains(self) -> None:
+        target = self.add_json("old-name", "--date", "2024-02-29")
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                "UPDATE events SET note = 'original note' WHERE id = ?",
+                (target["id"],),
+            )
+            database.commit()
+
+        incomplete = self.run_cli(
+            "replace", str(target["id"]), "--reason", "no change"
+        )
+        self.assertEqual(2, incomplete.returncode)
+        self.assertIn("requires at least one", incomplete.stderr)
+        missing = self.run_cli(
+            "replace", "missing", "--reason", "unknown", "--name", "new"
+        )
+        self.assertEqual(1, missing.returncode)
+        self.assertIn("event not found: missing", missing.stderr)
+
+        result = self.run_cli(
+            "replace",
+            str(target["id"]),
+            "--reason",
+            "rename activity",
+            "--name",
+            "new-name",
+            "--jsonl",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        first_correction = json.loads(result.stdout)
+        replacement_id = first_correction["replacement_id"]
+        self.assertEqual("replace", first_correction["kind"])
+        self.assertEqual(target["id"], first_correction["target_id"])
+        UUID(replacement_id)
+
+        old_history = self.run_cli("history", "old-name", "--jsonl")
+        self.assertEqual(1, old_history.returncode)
+        current = json.loads(
+            self.run_cli("history", "new-name", "--jsonl").stdout
+        )
+        self.assertEqual(replacement_id, current["id"])
+        self.assertEqual("2024-02-29", current["occurred_on"])
+        self.assertEqual("original note", current["note"])
+
+        old_audit = self.run_cli(
+            "history", "old-name", "--include-corrections", "--jsonl"
+        )
+        old_records = [json.loads(line) for line in old_audit.stdout.splitlines()]
+        self.assertEqual(
+            [target["id"], replacement_id],
+            [record["id"] for record in old_records[:2]],
+        )
+        self.assertEqual(first_correction, old_records[2])
+
+        second = self.run_cli(
+            "replace",
+            replacement_id,
+            "--reason",
+            "correct date and clear note",
+            "--date",
+            "2024-03-01",
+            "--note",
+            "",
+            "--jsonl",
+        )
+        self.assertEqual(0, second.returncode, second.stderr)
+        second_correction = json.loads(second.stdout)
+        self.assertEqual(replacement_id, second_correction["target_id"])
+        final_event = json.loads(
+            self.run_cli("history", "new-name", "--jsonl").stdout
+        )
+        self.assertEqual(second_correction["replacement_id"], final_event["id"])
+        self.assertEqual("new-name", final_event["name"])
+        self.assertEqual("2024-03-01", final_event["occurred_on"])
+        self.assertEqual("", final_event["note"])
+
+        audit = self.run_cli(
+            "history", "new-name", "--include-corrections", "--jsonl"
+        )
+        records = [json.loads(line) for line in audit.stdout.splitlines()]
+        self.assertEqual(3, sum(record["type"] == "event" for record in records))
+        self.assertEqual(
+            2, sum(record["type"] == "correction" for record in records)
+        )
 
     def test_single_event_summary_uses_null_and_human_dashes(self) -> None:
         event = self.add_json("single")
@@ -576,7 +743,7 @@ class CliContractTests(unittest.TestCase):
                     "Interval: -\nOccurrences: 1\n",
                     summary.stdout,
                 )
-                self.assertEqual("2024-02-29\n", history.stdout)
+                self.assertEqual(f"{event['id']}  2024-02-29\n", history.stdout)
 
     def test_mixed_precision_order_and_dst_interval_use_local_dates(self) -> None:
         date_event = self.add_json("mixed", "--date", "2026-03-08")
@@ -739,7 +906,9 @@ class CliContractTests(unittest.TestCase):
                         )
                     database.rollback()
 
-    def test_version_one_database_adds_corrections_without_changing_events(self) -> None:
+    def test_version_one_database_adds_corrections_without_changing_events(
+        self,
+    ) -> None:
         event = self.add_json("preserved", "--date", "2024-02-29")
         database_path = self.data_home / "last" / "last.db"
         with closing(sqlite3.connect(database_path)) as database:

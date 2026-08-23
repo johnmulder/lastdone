@@ -16,13 +16,25 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 SCHEMA_VERSION = 2
 BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class ActivityNotFound(Exception):
     """Raised when a requested activity has no events."""
+
+
+class EventNotFound(Exception):
+    """Raised when a requested event does not exist."""
+
+
+class EventAlreadyCorrected(Exception):
+    """Raised when a requested event already has a correction."""
+
+
+class InvalidCorrection(Exception):
+    """Raised when a correction request is incomplete."""
 
 
 class InvalidImport(Exception):
@@ -37,6 +49,24 @@ class ArgumentParser(argparse.ArgumentParser):
 def activity_name(value: str) -> str:
     if not value or not value.isprintable():
         raise argparse.ArgumentTypeError("NAME must be non-empty printable text")
+    return value
+
+
+def event_id(value: str) -> str:
+    if not value or not value.isprintable():
+        raise argparse.ArgumentTypeError("EVENT_ID must be non-empty printable text")
+    return value
+
+
+def correction_reason(value: str) -> str:
+    if not value or not value.isprintable():
+        raise argparse.ArgumentTypeError("TEXT must be non-empty printable text")
+    return value
+
+
+def replacement_note(value: str) -> str:
+    if any(not character.isprintable() for character in value):
+        raise argparse.ArgumentTypeError("TEXT must be printable text")
     return value
 
 
@@ -107,8 +137,54 @@ def parse_args(
 
     history = commands.add_parser("history", help="show full activity history")
     history.add_argument("name", type=activity_name, metavar="NAME")
+    history.add_argument(
+        "--include-corrections",
+        action="store_true",
+        help="include corrected events and correction records",
+    )
     history.add_argument("--jsonl", action="store_true", help="emit JSONL")
     history.set_defaults(handler=show_history)
+
+    void = commands.add_parser("void", help="void an event")
+    void.add_argument("event_id", type=event_id, metavar="EVENT_ID")
+    void.add_argument(
+        "--reason",
+        type=correction_reason,
+        required=True,
+        metavar="TEXT",
+    )
+    void.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    void.set_defaults(handler=void_event)
+
+    replace = commands.add_parser("replace", help="replace an event")
+    replace.add_argument("event_id", type=event_id, metavar="EVENT_ID")
+    replace.add_argument(
+        "--reason",
+        type=correction_reason,
+        required=True,
+        metavar="TEXT",
+    )
+    replace.add_argument(
+        "--name",
+        type=activity_name,
+        default=argparse.SUPPRESS,
+        metavar="NAME",
+    )
+    replace.add_argument(
+        "--date",
+        type=partial(calendar_date, today=today),
+        dest="occurred_on",
+        default=argparse.SUPPRESS,
+        metavar="DATE",
+    )
+    replace.add_argument(
+        "--note",
+        type=replacement_note,
+        default=argparse.SUPPRESS,
+        metavar="TEXT",
+    )
+    replace.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    replace.set_defaults(handler=replace_event)
 
     list_command = commands.add_parser("list", help="list known activities")
     list_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
@@ -444,6 +520,21 @@ def event_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {"schema_version": 2, "type": "event", **event_values(row)}
 
 
+def correction_values(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "target_id": row["target_id"],
+        "replacement_id": row["replacement_id"],
+        "reason": row["reason"],
+        "corrected_at": row["corrected_at"],
+    }
+
+
+def correction_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {"schema_version": 2, "type": "correction", **correction_values(row)}
+
+
 def interchange_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {"record_version": 1, "type": "event", **event_values(row)}
 
@@ -460,6 +551,9 @@ def rows_for_activity(
         SELECT rowid AS insertion_order, id, name, occurred_at, occurred_on, note
         FROM events
         WHERE name = ?
+          AND NOT EXISTS (
+              SELECT 1 FROM corrections WHERE target_id = events.id
+          )
         """,
         (name,),
     ).fetchall()
@@ -516,6 +610,120 @@ def add_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     return 0
 
 
+def uncorrected_event(
+    database: sqlite3.Connection, requested_id: str
+) -> sqlite3.Row:
+    event = database.execute(
+        """
+        SELECT id, name, occurred_at, occurred_on, note
+        FROM events
+        WHERE id = ?
+        """,
+        (requested_id,),
+    ).fetchone()
+    if event is None:
+        raise EventNotFound(requested_id)
+    correction = database.execute(
+        "SELECT 1 FROM corrections WHERE target_id = ?",
+        (requested_id,),
+    ).fetchone()
+    if correction is not None:
+        raise EventAlreadyCorrected(requested_id)
+    return event
+
+
+def store_correction(
+    database: sqlite3.Connection,
+    *,
+    kind: str,
+    target_id: str,
+    replacement_id: str | None,
+    reason: str,
+    now: datetime,
+) -> dict[str, Any]:
+    correction = {
+        "id": str(uuid4()),
+        "kind": kind,
+        "target_id": target_id,
+        "replacement_id": replacement_id,
+        "reason": reason,
+        "corrected_at": current_timestamp(now),
+    }
+    database.execute(
+        """
+        INSERT INTO corrections
+            (id, kind, target_id, replacement_id, reason, corrected_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        tuple(correction.values()),
+    )
+    return correction
+
+
+def void_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        uncorrected_event(database, args.event_id)
+        correction = store_correction(
+            database,
+            kind="void",
+            target_id=args.event_id,
+            replacement_id=None,
+            reason=args.reason,
+            now=args.now,
+        )
+        database.commit()
+    except Exception:
+        database.rollback()
+        raise
+    if args.jsonl:
+        emit_json(correction_record(correction))
+    return 0
+
+
+def replace_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    changed_fields = ("name", "occurred_on", "note")
+    if not any(hasattr(args, field) for field in changed_fields):
+        raise InvalidCorrection(
+            "replace requires at least one of --name, --date, or --note"
+        )
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        target = uncorrected_event(database, args.event_id)
+        date_changed = hasattr(args, "occurred_on")
+        replacement = {
+            "id": str(uuid4()),
+            "name": args.name if hasattr(args, "name") else target["name"],
+            "occurred_at": None if date_changed else target["occurred_at"],
+            "occurred_on": (
+                args.occurred_on if date_changed else target["occurred_on"]
+            ),
+            "note": args.note if hasattr(args, "note") else target["note"],
+        }
+        database.execute(
+            """
+            INSERT INTO events (id, name, occurred_at, occurred_on, note)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            tuple(replacement.values()),
+        )
+        correction = store_correction(
+            database,
+            kind="replace",
+            target_id=args.event_id,
+            replacement_id=replacement["id"],
+            reason=args.reason,
+            now=args.now,
+        )
+        database.commit()
+    except Exception:
+        database.rollback()
+        raise
+    if args.jsonl:
+        emit_json(correction_record(correction))
+    return 0
+
+
 def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     rows = rows_for_activity(database, args.name)
     if not rows:
@@ -555,6 +763,8 @@ def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int
 
 
 def show_history(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    if args.include_corrections:
+        return show_audit_history(database, args)
     rows = rows_for_activity(database, args.name)
     if not rows:
         raise ActivityNotFound(args.name)
@@ -562,13 +772,79 @@ def show_history(database: sqlite3.Connection, args: argparse.Namespace) -> int:
         if args.jsonl:
             emit_json(event_record(row))
         else:
-            print(occurrence_date(row).isoformat())
+            print(f"{row['id']}  {occurrence_date(row).isoformat()}")
+    return 0
+
+
+def show_audit_history(
+    database: sqlite3.Connection, args: argparse.Namespace
+) -> int:
+    corrections = database.execute(
+        """
+        SELECT c.rowid AS insertion_order,
+               c.id, c.kind, c.target_id, c.replacement_id,
+               c.reason, c.corrected_at
+        FROM corrections AS c
+        JOIN events AS target ON target.id = c.target_id
+        LEFT JOIN events AS replacement ON replacement.id = c.replacement_id
+        WHERE target.name = ? OR replacement.name = ?
+        ORDER BY c.rowid
+        """,
+        (args.name, args.name),
+    ).fetchall()
+    linked_ids = sorted(
+        {
+            linked_id
+            for correction in corrections
+            for linked_id in (
+                correction["target_id"],
+                correction["replacement_id"],
+            )
+            if linked_id is not None
+        }
+    )
+    placeholders = ",".join("?" for _ in linked_ids)
+    linked_clause = f" OR id IN ({placeholders})" if linked_ids else ""
+    events = database.execute(
+        f"""
+        SELECT rowid AS insertion_order,
+               id, name, occurred_at, occurred_on, note
+        FROM events
+        WHERE name = ?{linked_clause}
+        ORDER BY rowid
+        """,
+        (args.name, *linked_ids),
+    ).fetchall()
+    if not events and not corrections:
+        raise ActivityNotFound(args.name)
+    for event in events:
+        if args.jsonl:
+            emit_json(event_record(event))
+        else:
+            print(f"event {event['id']} {occurrence_date(event).isoformat()}")
+    for correction in corrections:
+        if args.jsonl:
+            emit_json(correction_record(correction))
+        else:
+            replacement = correction["replacement_id"] or "-"
+            print(
+                f"correction {correction['id']} {correction['kind']} "
+                f"{correction['target_id']} {replacement} "
+                f"{correction['corrected_at']} {correction['reason']}"
+            )
     return 0
 
 
 def list_activities(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     rows = database.execute(
-        "SELECT DISTINCT name FROM events ORDER BY name COLLATE BINARY"
+        """
+        SELECT DISTINCT name
+        FROM events
+        WHERE NOT EXISTS (
+            SELECT 1 FROM corrections WHERE target_id = events.id
+        )
+        ORDER BY name COLLATE BINARY
+        """
     ).fetchall()
     for row in rows:
         if args.jsonl:
@@ -845,6 +1121,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ActivityNotFound as error:
         print(f"lastdone: activity not found: {error}", file=sys.stderr)
         return 1
+    except EventNotFound as error:
+        print(f"lastdone: event not found: {error}", file=sys.stderr)
+        return 1
+    except EventAlreadyCorrected as error:
+        print(f"lastdone: event already corrected: {error}", file=sys.stderr)
+        return 1
+    except InvalidCorrection as error:
+        print(f"lastdone: error: {error}", file=sys.stderr)
+        return 2
     except InvalidImport as error:
         print(f"lastdone: import error: {error}", file=sys.stderr)
         return 2
