@@ -17,7 +17,7 @@ from uuid import uuid4
 
 
 VERSION = "0.7.0"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BUSY_TIMEOUT_SECONDS = 5.0
 SQLITE_MAX_INTEGER = 2**63 - 1
 
@@ -338,7 +338,7 @@ def create_corrections_table(database: sqlite3.Connection) -> None:
     )
 
 
-def create_activities_table(database: sqlite3.Connection) -> None:
+def create_version_3_activities_table(database: sqlite3.Connection) -> None:
     database.execute(
         """
         CREATE TABLE activities (
@@ -349,6 +349,31 @@ def create_activities_table(database: sqlite3.Connection) -> None:
                     typeof(expected_interval_days) = 'integer'
                     AND expected_interval_days > 0
                 )
+        )
+        """
+    )
+
+
+def create_activities_table(database: sqlite3.Connection) -> None:
+    database.execute(
+        """
+        CREATE TABLE activities (
+            name TEXT NOT NULL PRIMARY KEY
+                CONSTRAINT activities_name_nonempty CHECK (length(name) > 0),
+            expected_interval_days INTEGER
+                CONSTRAINT activities_interval_positive CHECK (
+                    expected_interval_days IS NULL OR (
+                        typeof(expected_interval_days) = 'integer'
+                        AND expected_interval_days > 0
+                    )
+                ),
+            display_name TEXT
+                CONSTRAINT activities_display_name_nonempty CHECK (
+                    display_name IS NULL OR length(display_name) > 0
+                ),
+            CONSTRAINT activities_metadata_present CHECK (
+                expected_interval_days IS NOT NULL OR display_name IS NOT NULL
+            )
         )
         """
     )
@@ -406,13 +431,28 @@ def migrate_to_version_2(database: sqlite3.Connection) -> None:
 
 
 def migrate_to_version_3(database: sqlite3.Connection) -> None:
+    create_version_3_activities_table(database)
+
+
+def migrate_to_version_4(database: sqlite3.Connection) -> None:
+    database.execute("ALTER TABLE activities RENAME TO activities_legacy")
     create_activities_table(database)
+    database.execute(
+        """
+        INSERT INTO activities
+            (name, expected_interval_days, display_name)
+        SELECT name, expected_interval_days, NULL
+        FROM activities_legacy
+        """
+    )
+    database.execute("DROP TABLE activities_legacy")
 
 
 MIGRATIONS = (
     migrate_to_version_1,
     migrate_to_version_2,
     migrate_to_version_3,
+    migrate_to_version_4,
 )
 
 
@@ -420,10 +460,12 @@ def database_schema_version(database: sqlite3.Connection) -> int:
     return database.execute("PRAGMA user_version").fetchone()[0]
 
 
-def backup_before_migration(database: sqlite3.Connection, path: Path) -> None:
-    if not table_columns(database):
+def backup_before_migration(
+    database: sqlite3.Connection, path: Path, source_version: int
+) -> None:
+    if source_version == 0 and not table_columns(database):
         return
-    backup_path = path.with_name(f"{path.name}.v0.bak")
+    backup_path = path.with_name(f"{path.name}.v{source_version}.bak")
     if backup_path.exists():
         return
     backup = sqlite3.connect(backup_path)
@@ -489,7 +531,11 @@ def validate_schema_structure(database: sqlite3.Connection) -> None:
     )
     if any(marker not in correction_sql for marker in correction_markers):
         raise sqlite3.DatabaseError("database schema does not match its version")
-    if activity_columns(database) != ("name", "expected_interval_days"):
+    if activity_columns(database) != (
+        "name",
+        "expected_interval_days",
+        "display_name",
+    ):
         raise sqlite3.DatabaseError("database schema does not match its version")
     activity_sql_row = database.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'activities'"
@@ -498,6 +544,8 @@ def validate_schema_structure(database: sqlite3.Connection) -> None:
     activity_markers = (
         "activities_name_nonempty",
         "activities_interval_positive",
+        "activities_display_name_nonempty",
+        "activities_metadata_present",
     )
     if any(marker not in activity_sql for marker in activity_markers):
         raise sqlite3.DatabaseError("database schema does not match its version")
@@ -520,8 +568,8 @@ def apply_migrations(database: sqlite3.Connection, path: Path) -> None:
             f"database schema version {version} is newer than supported version "
             f"{SCHEMA_VERSION}"
         )
-    if version == 0:
-        backup_before_migration(database, path)
+    if version in (0, 3):
+        backup_before_migration(database, path, version)
     while version < SCHEMA_VERSION:
         database.execute("BEGIN IMMEDIATE")
         try:

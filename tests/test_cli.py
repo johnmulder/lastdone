@@ -193,6 +193,7 @@ class CliContractTests(unittest.TestCase):
         database_path = self.data_home / "last" / "last.db"
         self.assertTrue(database_path.is_file())
         self.assertFalse(database_path.with_name("last.db.v0.bak").exists())
+        self.assertFalse(database_path.with_name("last.db.v3.bak").exists())
         if os.name == "posix":
             self.assertEqual(0o700, stat.S_IMODE(database_path.parent.stat().st_mode))
             self.assertEqual(0o600, stat.S_IMODE(database_path.stat().st_mode))
@@ -208,14 +209,17 @@ class CliContractTests(unittest.TestCase):
             activity_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'activities'"
             ).fetchone()[0]
-        self.assertEqual(3, version)
+        self.assertEqual(4, version)
         self.assertIn("events_occurred_at_valid", table_sql)
         self.assertIn("corrections_relationship_valid", correction_sql)
         self.assertIn("activities_interval_positive", activity_sql)
+        self.assertIn("activities_display_name_nonempty", activity_sql)
+        self.assertIn("activities_metadata_present", activity_sql)
 
         second = self.run_cli("list")
         self.assertEqual(0, second.returncode, second.stderr)
         self.assertFalse(database_path.with_name("last.db.v0.bak").exists())
+        self.assertFalse(database_path.with_name("last.db.v3.bak").exists())
 
     def test_add_is_silent_and_jsonl_add_is_an_event(self) -> None:
         silent = self.run_cli("add", "furnace-filter")
@@ -638,7 +642,7 @@ class CliContractTests(unittest.TestCase):
                 "schema_version": 2,
                 "type": "doctor",
                 "database": str(database_path.resolve()),
-                "database_schema_version": 3,
+                "database_schema_version": 4,
                 "schema": "ok",
                 "integrity": "ok",
                 "permissions": "ok" if os.name == "posix" else "not-applicable",
@@ -1105,12 +1109,14 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(0, self.run_cli("list").returncode)
         database_path = self.data_home / "last" / "last.db"
         invalid_activities = (
-            (None, 1),
-            ("", 1),
-            ("zero", 0),
-            ("negative", -1),
-            ("real", 1.5),
-            ("text", "days"),
+            (None, 1, None),
+            ("", 1, None),
+            ("zero", 0, None),
+            ("negative", -1, None),
+            ("real", 1.5, None),
+            ("text", "days", None),
+            ("missing", None, None),
+            ("empty-display", None, ""),
         )
         with closing(sqlite3.connect(database_path)) as database:
             for activity in invalid_activities:
@@ -1119,8 +1125,8 @@ class CliContractTests(unittest.TestCase):
                         database.execute(
                             """
                             INSERT INTO activities
-                                (name, expected_interval_days)
-                            VALUES (?, ?)
+                                (name, expected_interval_days, display_name)
+                            VALUES (?, ?, ?)
                             """,
                             activity,
                         )
@@ -1217,7 +1223,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(event, json.loads(result.stdout))
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                3, database.execute("PRAGMA user_version").fetchone()[0]
+                4, database.execute("PRAGMA user_version").fetchone()[0]
             )
             self.assertIsNotNone(
                 database.execute(
@@ -1253,7 +1259,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(json.loads(correction.stdout), records[1])
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                3, database.execute("PRAGMA user_version").fetchone()[0]
+                4, database.execute("PRAGMA user_version").fetchone()[0]
             )
             self.assertEqual(
                 1, database.execute("SELECT count(*) FROM events").fetchone()[0]
@@ -1262,6 +1268,72 @@ class CliContractTests(unittest.TestCase):
                 1,
                 database.execute("SELECT count(*) FROM corrections").fetchone()[0],
             )
+
+    def test_version_three_activity_migration_preserves_interval_and_backup(
+        self,
+    ) -> None:
+        self.assertEqual(
+            0, self.run_cli("set", "preserved", "--every", "90d").returncode
+        )
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.executescript(
+                """
+                DROP TABLE activities;
+                CREATE TABLE activities (
+                    name TEXT NOT NULL PRIMARY KEY
+                        CONSTRAINT activities_name_nonempty
+                        CHECK (length(name) > 0),
+                    expected_interval_days INTEGER NOT NULL
+                        CONSTRAINT activities_interval_positive CHECK (
+                            typeof(expected_interval_days) = 'integer'
+                            AND expected_interval_days > 0
+                        )
+                );
+                INSERT INTO activities (name, expected_interval_days)
+                VALUES ('preserved', 90);
+                PRAGMA user_version = 3;
+                """
+            )
+            database.commit()
+
+        result = self.run_cli("list")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("preserved\n", result.stdout)
+        backup_path = database_path.with_name("last.db.v3.bak")
+        self.assertTrue(backup_path.is_file())
+        if os.name == "posix":
+            self.assertEqual(0o600, stat.S_IMODE(backup_path.stat().st_mode))
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(
+                4, database.execute("PRAGMA user_version").fetchone()[0]
+            )
+            self.assertEqual(
+                ("preserved", 90, None),
+                database.execute(
+                    """
+                    SELECT name, expected_interval_days, display_name
+                    FROM activities
+                    """
+                ).fetchone(),
+            )
+        with closing(sqlite3.connect(backup_path)) as backup:
+            self.assertEqual(
+                3, backup.execute("PRAGMA user_version").fetchone()[0]
+            )
+            self.assertEqual(
+                ("name", "expected_interval_days"),
+                tuple(
+                    row[1] for row in backup.execute("PRAGMA table_info(activities)")
+                ),
+            )
+            self.assertEqual(
+                ("preserved", 90),
+                backup.execute("SELECT * FROM activities").fetchone(),
+            )
+        before = backup_path.read_bytes()
+        self.assertEqual(0, self.run_cli("list").returncode)
+        self.assertEqual(before, backup_path.read_bytes())
 
     def test_legacy_database_migrates_without_changing_instant(self) -> None:
         database_path = self.data_home / "last" / "last.db"
@@ -1334,7 +1406,7 @@ class CliContractTests(unittest.TestCase):
             table_sql = database.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'events'"
             ).fetchone()[0]
-        self.assertEqual(3, version)
+        self.assertEqual(4, version)
         self.assertIn("occurred_on", columns)
         self.assertIn("idx_events_name", indexes)
         self.assertNotIn("idx_events_name_occurred_at", indexes)
@@ -1370,7 +1442,7 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(database_path.with_name("last.db.v0.bak").is_file())
         with closing(sqlite3.connect(database_path)) as database:
             self.assertEqual(
-                3, database.execute("PRAGMA user_version").fetchone()[0]
+                4, database.execute("PRAGMA user_version").fetchone()[0]
             )
 
     def test_invalid_legacy_data_rolls_back_and_keeps_backup(self) -> None:
