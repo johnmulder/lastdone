@@ -65,7 +65,7 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.9.0\n", version.stdout)
+        self.assertEqual("lastdone 0.10.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
@@ -74,6 +74,7 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("--db PATH", help_result.stdout)
         self.assertIn("export", help_result.stdout)
         self.assertIn("import", help_result.stdout)
+        self.assertIn("batch", help_result.stdout)
         self.assertIn("doctor", help_result.stdout)
         self.assertIn("void", help_result.stdout)
         self.assertIn("replace", help_result.stdout)
@@ -107,6 +108,7 @@ class CliContractTests(unittest.TestCase):
             ("list", "--db", "somewhere.db"),
             ("export",),
             ("import",),
+            ("batch",),
             ("void", ""),
             ("void", "event"),
             ("void", "event", "--reason", ""),
@@ -694,6 +696,111 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(2, doctor["corrections"])
         self.assertEqual(1, doctor["activities"])
         self.assertEqual("ok", doctor["conventions"])
+
+    def test_batch_accepts_event_versions_and_idempotent_replay(self) -> None:
+        old_event = {
+            "record_version": 1,
+            "type": "event",
+            "id": "old-event",
+            "name": "water-meter",
+            "occurred_at": None,
+            "occurred_on": "2024-01-01",
+            "note": "initial reading",
+        }
+        current_event = {
+            "record_version": 5,
+            "type": "event",
+            "id": "current-event",
+            "name": "water-meter",
+            "occurred_at": "2024-02-01T12:00:00.000000Z",
+            "occurred_on": None,
+            "note": "café meter",
+            "reading_value": "42.5",
+            "reading_unit": "gal",
+        }
+        stream = "".join(
+            f"{json.dumps(record, ensure_ascii=False)}\n"
+            for record in (old_event, current_event)
+        )
+        database_path = self.data_home / "batch" / "last.db"
+        arguments = ("--db", str(database_path))
+
+        empty = self.run_cli(*arguments, "batch", "--jsonl", input_text="")
+        self.assertEqual(0, empty.returncode, empty.stderr)
+        self.assertEqual("", empty.stdout)
+        self.assertEqual("", empty.stderr)
+
+        for _ in range(2):
+            result = self.run_cli(
+                *arguments, "batch", "--jsonl", input_text=stream
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("", result.stdout)
+            self.assertEqual("", result.stderr)
+
+        exported = self.run_cli(*arguments, "export", "--jsonl")
+        self.assertEqual(
+            [
+                {
+                    **old_event,
+                    "record_version": 5,
+                    "reading_value": None,
+                    "reading_unit": None,
+                },
+                current_event,
+            ],
+            [json.loads(line) for line in exported.stdout.splitlines()],
+        )
+
+    def test_batch_is_event_only_atomic_and_does_not_echo_input(self) -> None:
+        valid_event = {
+            "record_version": 5,
+            "type": "event",
+            "id": "rolled-back-event",
+            "name": "private-log",
+            "occurred_at": None,
+            "occurred_on": "2024-01-01",
+            "note": None,
+            "reading_value": None,
+            "reading_unit": None,
+        }
+        private_note = "secret-note-4831"
+        non_event = {
+            "record_version": 5,
+            "type": "activity",
+            "note": private_note,
+        }
+        stream = "".join(
+            f"{json.dumps(record)}\n" for record in (valid_event, non_event)
+        )
+        database_path = self.data_home / "rejected-batch" / "last.db"
+        arguments = ("--db", str(database_path))
+
+        result = self.run_cli(
+            *arguments, "batch", "--jsonl", input_text=stream
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertEqual(
+            "lastdone: batch error: line 2: expected event record\n",
+            result.stderr,
+        )
+        self.assertNotIn(private_note, result.stderr)
+        self.assertEqual("", self.run_cli(*arguments, "export", "--jsonl").stdout)
+
+        invalid_json = self.run_cli(
+            *arguments,
+            "batch",
+            "--jsonl",
+            input_text=f"{json.dumps(valid_event)}\n{{{private_note}}}\n",
+        )
+        self.assertEqual(2, invalid_json.returncode)
+        self.assertEqual(
+            "lastdone: batch error: line 2: invalid JSON\n",
+            invalid_json.stderr,
+        )
+        self.assertNotIn(private_note, invalid_json.stderr)
+        self.assertEqual("", self.run_cli(*arguments, "export", "--jsonl").stdout)
 
     def test_import_requires_events_before_valid_corrections(self) -> None:
         event = {

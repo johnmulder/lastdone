@@ -19,7 +19,7 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 SCHEMA_VERSION = 5
 BUSY_TIMEOUT_SECONDS = 5.0
 SQLITE_MAX_INTEGER = 2**63 - 1
@@ -51,6 +51,10 @@ class InvalidReading(Exception):
 
 class InvalidImport(Exception):
     """Raised when an interchange record cannot be imported."""
+
+
+class InvalidBatch(Exception):
+    """Raised when an event batch cannot be recorded."""
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -202,6 +206,10 @@ def parse_args(
     add.add_argument("--allow-decrease", action="store_true")
     add.add_argument("--jsonl", action="store_true", help="emit JSONL")
     add.set_defaults(handler=add_event)
+
+    batch = commands.add_parser("batch", help="record event stream")
+    batch.add_argument("--jsonl", action="store_true", required=True)
+    batch.set_defaults(handler=batch_events)
 
     show = commands.add_parser("show", help="show an activity summary")
     show.add_argument("name", type=activity_key, metavar="KEY")
@@ -1632,7 +1640,7 @@ def parse_activity_import_record(
 
 
 def parse_import_record(
-    line: str, line_number: int
+    line: str, line_number: int, *, events_only: bool = False
 ) -> tuple[str, dict[str, Any]]:
     try:
         record = json.loads(line)
@@ -1643,6 +1651,8 @@ def parse_import_record(
     record_type = record.get("type")
     if record_type == "event":
         return record_type, parse_event_import_record(record, line_number)
+    if events_only:
+        raise InvalidImport(f"line {line_number}: expected event record")
     if record_type == "correction":
         return record_type, parse_correction_import_record(record, line_number)
     if record_type == "activity":
@@ -1785,12 +1795,14 @@ def import_activity_record(
     )
 
 
-def import_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+def import_records(database: sqlite3.Connection, *, events_only: bool) -> int:
     line_number = 0
     database.execute("BEGIN IMMEDIATE")
     try:
         for line_number, line in enumerate(sys.stdin, 1):
-            record_type, record = parse_import_record(line, line_number)
+            record_type, record = parse_import_record(
+                line, line_number, events_only=events_only
+            )
             if record_type == "event":
                 import_event_record(database, record, line_number)
             elif record_type == "correction":
@@ -1807,6 +1819,17 @@ def import_events(database: sqlite3.Connection, args: argparse.Namespace) -> int
         database.rollback()
         raise
     return 0
+
+
+def batch_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    try:
+        return import_records(database, events_only=True)
+    except InvalidImport as error:
+        raise InvalidBatch(str(error)) from None
+
+
+def import_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    return import_records(database, events_only=False)
 
 
 def stored_convention_issues(database: sqlite3.Connection) -> list[str]:
@@ -2089,6 +2112,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except InvalidReading as error:
         print(f"lastdone: error: {error}", file=sys.stderr)
+        return 2
+    except InvalidBatch as error:
+        print(f"lastdone: batch error: {error}", file=sys.stderr)
         return 2
     except InvalidImport as error:
         print(f"lastdone: import error: {error}", file=sys.stderr)
