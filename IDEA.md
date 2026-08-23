@@ -370,9 +370,11 @@ The database should remain an implementation detail. The CLI is the stable inter
 Portability should use a versioned JSONL event format rather than expose table
 or column names. Export in insertion order and import within one transaction;
 re-importing an identical event ID is harmless, while conflicting content is an
-error. A read-only `doctor` command should report the selected path, schema,
-integrity, permissions, and event parseability without creating or migrating a
-database.
+error. Batch capture should accept the same event records from standard input in
+one all-or-nothing transaction while keeping the single-event command as the
+interactive default. A read-only `doctor` command should report the selected
+path, schema, integrity, permissions, and event parseability without creating or
+migrating a database.
 
 Corrections should remain append-only. A void links to one event and removes it
 from effective queries; a replacement links that event to one new ordinary

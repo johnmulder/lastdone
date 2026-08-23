@@ -14,6 +14,7 @@ this command-specific contract. Its version is independent of this CLI version.
 ```text
 lastdone [--db PATH] add KEY [--date YYYY-MM-DD] [--reading VALUEUNIT]
          [--allow-decrease] [--jsonl]
+lastdone [--db PATH] batch --jsonl
 lastdone [--db PATH] show KEY [--jsonl]
 lastdone [--db PATH] history KEY [--include-corrections] [--jsonl]
 lastdone [--db PATH] list [--jsonl]
@@ -248,6 +249,20 @@ reading.
 
 Human mode is silent on success. JSONL mode emits the new event record.
 
+### `batch`
+
+`batch --jsonl` reads event interchange records from standard input and records
+the complete stream in one transaction. It accepts the same version 1 through 5
+event shapes as `import`, including explicit IDs, notes, occurrence precision,
+and readings, but rejects correction and activity records. It does not define a
+CSV or delimiter format.
+
+An existing identical event ID is a no-op. An ID with different content,
+malformed JSON, a blank line, an unsupported version, or an invalid field rolls
+back the entire batch and returns 2. The diagnostic begins
+`lastdone: batch error: line N:` and never echoes the input record or note. An
+empty stream and a valid stream are silent successes.
+
 ### `show`
 
 Human output is:
@@ -394,7 +409,7 @@ Help returns 0, writes usage text to stdout, and writes nothing to stderr.
 Version returns 0 and writes exactly:
 
 ```text
-lastdone 0.9.0
+lastdone 0.10.0
 ```
 
 ## Exit codes
@@ -403,7 +418,7 @@ lastdone 0.9.0
 | ---: | --- |
 | 0 | Success, including an empty list or closed output pipe |
 | 1 | Named activity/event not found, or event already corrected |
-| 2 | Invalid command, option, value, argument count, or import stream |
+| 2 | Invalid command, option, value, argument count, batch, or import stream |
 | 3 | Storage or configuration failure |
 
 Exit codes do not encode ordinary data states.
