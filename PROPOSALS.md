@@ -4,34 +4,9 @@ These proposals are ordered by when they are likely to pay off. Later proposals
 should wait for usage evidence. They preserve the project's local-first,
 append-oriented, and Unix-like goals without turning it into a task manager.
 
-## Immediately after the MVP
-
-### 1. Publish personal-OS conventions as fixtures, not a shared library
-
-**Gap**
-
-The idea identifies shared conventions for dates, JSONL, errors, and exit codes,
-but prose alone will drift as sibling commands are implemented. A shared runtime
-library, however, would tightly couple otherwise independent tools too early.
-
-**Approach**
-
-Create a small interoperability specification with representative input/output
-fixtures. Each command can implement the conventions independently and run the
-same fixture checks in its own test suite.
-
-**Implementation considerations**
-
-- Specify UTF-8, RFC 3339 timestamps, JSONL framing, error destination, and common
-  field names such as `name` and `occurred_at`.
-- Version the interchange contract independently from the executable version.
-- Prefer copied or published fixtures over a mandatory shared package.
-- Add a shared library only when multiple tools contain the same non-trivial code
-  and changes repeatedly need coordinated fixes.
-
 ## Usage-driven extensions
 
-### 2. Support one structured reading per event
+### 1. Support one structured reading per event
 
 **Gap**
 
@@ -57,7 +32,7 @@ compatible reading. Keep time-based due calculations independent at first.
 - Usage-based due predictions need a trustworthy current reading source and
   should remain a later, separate proposal.
 
-### 3. Add batch capture through standard input
+### 2. Add batch capture through standard input
 
 **Gap**
 
