@@ -370,6 +370,11 @@ event. Store a reason and UTC correction timestamp for both. Default summaries,
 histories, lists, and future due calculations should use only events that are not
 correction targets.
 
+Expected intervals should be optional activity metadata measured only in whole
+calendar days. Due calculations use the process's current local date and the
+latest effective event's displayed date; they do not schedule work or measure
+elapsed hours. A configured activity remains meaningful before its first event.
+
 ---
 
 ## Suggested Schema
@@ -452,12 +457,13 @@ CREATE TABLE corrections (
 );
 
 CREATE TABLE activities (
-    name TEXT PRIMARY KEY,
-    expected_interval_seconds INTEGER
+    name TEXT NOT NULL PRIMARY KEY
+        CONSTRAINT activities_name_nonempty CHECK (length(name) > 0),
+    expected_interval_days INTEGER NOT NULL
         CONSTRAINT activities_interval_positive CHECK (
-            expected_interval_seconds IS NULL OR expected_interval_seconds > 0
-        ),
-    description TEXT
+            typeof(expected_interval_days) = 'integer'
+            AND expected_interval_days > 0
+        )
 );
 ```
 
@@ -523,6 +529,11 @@ populated. Human output renders instants in local time and date-only events
 unchanged. Mixed history sorts by displayed calendar date; exact instants precede
 date-only events on the same date. Intervals compare calendar dates rather than
 elapsed 24-hour blocks.
+
+Expected intervals accept only a positive whole-day form such as `90d`. An
+activity is due today when its latest effective displayed date plus the interval
+equals the current local date, and overdue only after that date. Machine output
+distinguishes never-recorded, future-dated, not-due, due-today, and overdue.
 
 ---
 
@@ -703,7 +714,7 @@ Questions worth answering through use rather than up-front design:
 
 - Should activity names support aliases?
 - Is JSONL preferable to conventional JSON for single-record queries?
-- Should expected intervals allow calendar units such as `3mo`, or only durations?
+- Does real usage justify adding calendar-month intervals beyond whole days?
 - Should notes remain free text or support arbitrary key/value metadata?
 - Should events ever be editable, or only corrected through explicit replacement/tombstone events?
 - Should all personal-OS tools eventually share one database, or merely interoperable formats?
