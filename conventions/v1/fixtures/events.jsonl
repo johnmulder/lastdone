@@ -1,3 +1,3 @@
-{"record_version":4,"type":"event","id":"event-older","name":"furnace-filter","occurred_at":null,"occurred_on":"2026-05-14","note":"MERV 11 — café"}
-{"record_version":4,"type":"event","id":"event-latest","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null,"note":"Filtre changé 🏠"}
-{"record_version":4,"type":"activity","name":"furnace-filter","expected_interval_days":90,"display_name":"Filtre à air 🏠 תחזוקה"}
+{"record_version":5,"type":"event","id":"event-older","name":"furnace-filter","occurred_at":null,"occurred_on":"2026-05-14","note":"MERV 11 — café","reading_value":"80800","reading_unit":"mi"}
+{"record_version":5,"type":"event","id":"event-latest","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null,"note":"Filtre changé 🏠","reading_value":"84221.5","reading_unit":"mi"}
+{"record_version":5,"type":"activity","name":"furnace-filter","expected_interval_days":90,"display_name":"Filtre à air 🏠 תחזוקה"}

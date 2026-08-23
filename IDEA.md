@@ -459,7 +459,7 @@ CREATE TABLE events (
             )
             AND typeof(reading_unit) = 'text'
             AND reading_unit GLOB '[a-z]*'
-            AND reading_unit NOT GLOB '*[^a-z0-9-]*'
+            AND reading_unit NOT GLOB '*[^a-z-]*'
             AND reading_unit NOT LIKE '%-'
             AND reading_unit NOT LIKE '%--%'
         )

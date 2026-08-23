@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, localcontext
 from functools import partial
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import sys
@@ -17,7 +19,7 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 SCHEMA_VERSION = 5
 BUSY_TIMEOUT_SECONDS = 5.0
 SQLITE_MAX_INTEGER = 2**63 - 1
@@ -41,6 +43,10 @@ class InvalidCorrection(Exception):
 
 class InvalidActivityUpdate(Exception):
     """Raised when an activity metadata update is incomplete."""
+
+
+class InvalidReading(Exception):
+    """Raised when a cumulative reading is incomplete or decreases."""
 
 
 class InvalidImport(Exception):
@@ -93,6 +99,30 @@ def display_name(value: str) -> str:
     if not value or not value.isprintable():
         raise argparse.ArgumentTypeError("TEXT must be non-empty printable text")
     return unicodedata.normalize("NFC", value)
+
+
+READING_PATTERN = re.compile(
+    r"(?P<value>(?:0|[1-9][0-9]*)(?:\.[0-9]+)?)"
+    r"(?P<unit>[a-z]+(?:-[a-z]+)*)"
+)
+
+
+def canonical_decimal(value: str) -> str:
+    sign = "-" if value.startswith("-") else ""
+    unsigned = value.removeprefix("-")
+    whole, point, fraction = unsigned.partition(".")
+    fraction = fraction.rstrip("0")
+    result = whole + (point + fraction if fraction else "")
+    return "0" if result == "0" else sign + result
+
+
+def reading(value: str) -> tuple[str, str]:
+    match = READING_PATTERN.fullmatch(value)
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            "READING must be a non-negative decimal followed by a lowercase unit"
+        )
+    return canonical_decimal(match["value"]), match["unit"]
 
 
 def expanded_path(value: str) -> Path:
@@ -168,6 +198,8 @@ def parse_args(
         dest="occurred_on",
         metavar="DATE",
     )
+    add.add_argument("--reading", type=reading, metavar="VALUEUNIT")
+    add.add_argument("--allow-decrease", action="store_true")
     add.add_argument("--jsonl", action="store_true", help="emit JSONL")
     add.set_defaults(handler=add_event)
 
@@ -205,6 +237,13 @@ def parse_args(
         required=True,
         metavar="TEXT",
     )
+    replace.add_argument(
+        "--reading",
+        type=reading,
+        default=argparse.SUPPRESS,
+        metavar="VALUEUNIT",
+    )
+    replace.add_argument("--allow-decrease", action="store_true")
     replace.add_argument(
         "--name",
         type=activity_key,
@@ -501,7 +540,7 @@ def migrate_to_version_5(database: sqlite3.Connection) -> None:
                     )
                     AND typeof(reading_unit) = 'text'
                     AND reading_unit GLOB '[a-z]*'
-                    AND reading_unit NOT GLOB '*[^a-z0-9-]*'
+                    AND reading_unit NOT GLOB '*[^a-z-]*'
                     AND reading_unit NOT LIKE '%-'
                     AND reading_unit NOT LIKE '%--%'
                 )
@@ -711,6 +750,8 @@ def event_values(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "occurred_at": row["occurred_at"],
         "occurred_on": row["occurred_on"],
         "note": row["note"],
+        "reading_value": row["reading_value"],
+        "reading_unit": row["reading_unit"],
     }
 
 
@@ -750,19 +791,19 @@ def activity_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 
 def interchange_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    return {"record_version": 4, "type": "event", **event_values(row)}
+    return {"record_version": 5, "type": "event", **event_values(row)}
 
 
 def correction_interchange_record(
     row: sqlite3.Row | dict[str, Any],
 ) -> dict[str, Any]:
-    return {"record_version": 4, "type": "correction", **correction_values(row)}
+    return {"record_version": 5, "type": "correction", **correction_values(row)}
 
 
 def activity_interchange_record(
     row: sqlite3.Row | dict[str, Any],
 ) -> dict[str, Any]:
-    return {"record_version": 4, "type": "activity", **activity_values(row)}
+    return {"record_version": 5, "type": "activity", **activity_values(row)}
 
 
 def emit_json(record: dict[str, Any]) -> None:
@@ -774,7 +815,8 @@ def rows_for_activity(
 ) -> list[sqlite3.Row]:
     rows = database.execute(
         """
-        SELECT rowid AS insertion_order, id, name, occurred_at, occurred_on, note
+        SELECT rowid AS insertion_order, id, name, occurred_at, occurred_on, note,
+               reading_value, reading_unit
         FROM events
         WHERE name = ?
           AND NOT EXISTS (
@@ -796,7 +838,9 @@ def occurrence_date(row: sqlite3.Row | dict[str, Any]) -> date:
     return local_date(row["occurred_at"])
 
 
-def occurrence_sort_key(row: sqlite3.Row) -> tuple[date, bool, str, int]:
+def occurrence_sort_key(
+    row: sqlite3.Row | dict[str, Any],
+) -> tuple[date, bool, str, int]:
     return (
         occurrence_date(row),
         row["occurred_at"] is not None,
@@ -805,32 +849,109 @@ def occurrence_sort_key(row: sqlite3.Row) -> tuple[date, bool, str, int]:
     )
 
 
+def decimal_difference(current: str, previous: str) -> str:
+    digit_count = sum(character.isdigit() for character in current + previous)
+    with localcontext() as context:
+        context.prec = digit_count + 1
+        difference = Decimal(current) - Decimal(previous)
+    return canonical_decimal(format(difference, "f"))
+
+
+def reading_text(row: sqlite3.Row | dict[str, Any]) -> str:
+    if row["reading_value"] is None:
+        return "-"
+    return f"{row['reading_value']}{row['reading_unit']}"
+
+
+def validate_reading_order(
+    database: sqlite3.Connection,
+    event: dict[str, Any],
+    *,
+    allow_decrease: bool,
+    exclude_id: str | None = None,
+) -> None:
+    if event["reading_value"] is None:
+        if allow_decrease:
+            raise InvalidReading("--allow-decrease requires a reading")
+        return
+    if allow_decrease:
+        return
+
+    exclusion = " AND id <> ?" if exclude_id is not None else ""
+    parameters: tuple[str, ...] = (event["name"], event["reading_unit"])
+    if exclude_id is not None:
+        parameters += (exclude_id,)
+    rows = database.execute(
+        f"""
+        SELECT rowid AS insertion_order,
+               id, name, occurred_at, occurred_on, note,
+               reading_value, reading_unit
+        FROM events
+        WHERE name = ? AND reading_unit = ?{exclusion}
+          AND NOT EXISTS (
+              SELECT 1 FROM corrections WHERE target_id = events.id
+          )
+        """,
+        parameters,
+    ).fetchall()
+    candidate = {
+        **event,
+        "insertion_order": database.execute(
+            "SELECT coalesce(max(rowid), 0) + 1 FROM events"
+        ).fetchone()[0],
+    }
+    ordered = sorted((*rows, candidate), key=occurrence_sort_key)
+    position = next(
+        index for index, row in enumerate(ordered) if row is candidate
+    )
+    value = Decimal(event["reading_value"])
+    decreases = (
+        position > 0 and value < Decimal(ordered[position - 1]["reading_value"])
+    ) or (
+        position + 1 < len(ordered)
+        and value > Decimal(ordered[position + 1]["reading_value"])
+    )
+    if decreases:
+        raise InvalidReading(
+            "reading would decrease; use --allow-decrease to confirm a reset"
+        )
+
+
 def occurrence_record(row: sqlite3.Row) -> dict[str, str | None]:
     return {"occurred_at": row["occurred_at"], "occurred_on": row["occurred_on"]}
 
 
 def add_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    reading_value, reading_unit = args.reading or (None, None)
     event = {
         "id": str(uuid4()),
         "name": args.name,
         "occurred_at": None if args.occurred_on else current_timestamp(args.now),
         "occurred_on": args.occurred_on,
         "note": None,
+        "reading_value": reading_value,
+        "reading_unit": reading_unit,
     }
-    database.execute(
-        """
-        INSERT INTO events (id, name, occurred_at, occurred_on, note)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            event["id"],
-            event["name"],
-            event["occurred_at"],
-            event["occurred_on"],
-            event["note"],
-        ),
-    )
-    database.commit()
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        validate_reading_order(
+            database,
+            event,
+            allow_decrease=args.allow_decrease,
+        )
+        database.execute(
+            """
+            INSERT INTO events
+                (id, name, occurred_at, occurred_on, note,
+                 reading_value, reading_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            tuple(event.values()),
+        )
+        database.commit()
+    except Exception:
+        database.rollback()
+        raise
     if args.jsonl:
         emit_json(event_record(event))
     return 0
@@ -841,7 +962,8 @@ def uncorrected_event(
 ) -> sqlite3.Row:
     event = database.execute(
         """
-        SELECT id, name, occurred_at, occurred_on, note
+        SELECT id, name, occurred_at, occurred_on, note,
+               reading_value, reading_unit
         FROM events
         WHERE id = ?
         """,
@@ -908,10 +1030,10 @@ def void_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
 
 
 def replace_event(database: sqlite3.Connection, args: argparse.Namespace) -> int:
-    changed_fields = ("name", "occurred_on", "note")
+    changed_fields = ("name", "occurred_on", "note", "reading")
     if not any(hasattr(args, field) for field in changed_fields):
         raise InvalidCorrection(
-            "replace requires at least one of --name, --date, or --note"
+            "replace requires at least one of --name, --date, --note, or --reading"
         )
     database.execute("BEGIN IMMEDIATE")
     try:
@@ -925,11 +1047,29 @@ def replace_event(database: sqlite3.Connection, args: argparse.Namespace) -> int
                 args.occurred_on if date_changed else target["occurred_on"]
             ),
             "note": args.note if hasattr(args, "note") else target["note"],
+            "reading_value": (
+                args.reading[0]
+                if hasattr(args, "reading")
+                else target["reading_value"]
+            ),
+            "reading_unit": (
+                args.reading[1]
+                if hasattr(args, "reading")
+                else target["reading_unit"]
+            ),
         }
+        validate_reading_order(
+            database,
+            replacement,
+            allow_decrease=args.allow_decrease,
+            exclude_id=args.event_id,
+        )
         database.execute(
             """
-            INSERT INTO events (id, name, occurred_at, occurred_on, note)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO events
+                (id, name, occurred_at, occurred_on, note,
+                 reading_value, reading_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             tuple(replacement.values()),
         )
@@ -967,6 +1107,20 @@ def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int
         (args.name,),
     ).fetchone()
     configured_display_name = metadata["display_name"] if metadata else None
+    reading_change = None
+    if latest["reading_value"] is not None:
+        previous_reading = next(
+            (
+                row
+                for row in rows[1:]
+                if row["reading_unit"] == latest["reading_unit"]
+            ),
+            None,
+        )
+        if previous_reading is not None:
+            reading_change = decimal_difference(
+                latest["reading_value"], previous_reading["reading_value"]
+            )
     if args.jsonl:
         emit_json(
             {
@@ -977,6 +1131,9 @@ def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int
                 "last": occurrence_record(latest),
                 "previous": occurrence_record(previous) if previous else None,
                 "interval_days": interval,
+                "reading_value": latest["reading_value"],
+                "reading_unit": latest["reading_unit"],
+                "reading_change": reading_change,
                 "occurrences": len(rows),
             }
         )
@@ -994,6 +1151,16 @@ def show_activity(database: sqlite3.Connection, args: argparse.Namespace) -> int
         else "Previous: -"
     )
     print(f"Interval: {interval} days" if interval is not None else "Interval: -")
+    if latest["reading_value"] is None:
+        print("Reading: -")
+    else:
+        change = (
+            f" ({'+' if not reading_change.startswith('-') else ''}"
+            f"{reading_change}{latest['reading_unit']})"
+            if reading_change is not None
+            else ""
+        )
+        print(f"Reading: {reading_text(latest)}{change}")
     print(f"Occurrences: {len(rows)}")
     return 0
 
@@ -1008,7 +1175,10 @@ def show_history(database: sqlite3.Connection, args: argparse.Namespace) -> int:
         if args.jsonl:
             emit_json(event_record(row))
         else:
-            print(f"{row['id']}  {occurrence_date(row).isoformat()}")
+            print(
+                f"{row['id']}  {occurrence_date(row).isoformat()}  "
+                f"{reading_text(row)}"
+            )
     return 0
 
 
@@ -1044,7 +1214,8 @@ def show_audit_history(
     events = database.execute(
         f"""
         SELECT rowid AS insertion_order,
-               id, name, occurred_at, occurred_on, note
+               id, name, occurred_at, occurred_on, note,
+               reading_value, reading_unit
         FROM events
         WHERE name = ?{linked_clause}
         ORDER BY rowid
@@ -1057,7 +1228,10 @@ def show_audit_history(
         if args.jsonl:
             emit_json(event_record(event))
         else:
-            print(f"event {event['id']} {occurrence_date(event).isoformat()}")
+            print(
+                f"event {event['id']} {occurrence_date(event).isoformat()} "
+                f"{reading_text(event)}"
+            )
     for correction in corrections:
         if args.jsonl:
             emit_json(correction_record(correction))
@@ -1216,7 +1390,8 @@ def show_due(database: sqlite3.Connection, args: argparse.Namespace) -> int:
 def export_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     rows = database.execute(
         """
-        SELECT id, name, occurred_at, occurred_on, note
+        SELECT id, name, occurred_at, occurred_on, note,
+               reading_value, reading_unit
         FROM events
         ORDER BY rowid
         """
@@ -1257,7 +1432,8 @@ def valid_import_timestamp(value: str) -> bool:
 def parse_event_import_record(
     record: dict[str, Any], line_number: int
 ) -> dict[str, Any]:
-    fields = {
+    version = record.get("record_version")
+    old_fields = {
         "record_version",
         "type",
         "id",
@@ -1266,13 +1442,11 @@ def parse_event_import_record(
         "occurred_on",
         "note",
     }
-    if set(record) != fields:
-        raise InvalidImport(f"line {line_number}: expected event record fields")
-    if (
-        type(record["record_version"]) is not int
-        or record["record_version"] not in (1, 2, 3, 4)
-    ):
+    version_5_fields = {*old_fields, "reading_value", "reading_unit"}
+    if type(version) is not int or version not in (1, 2, 3, 4, 5):
         raise InvalidImport(f"line {line_number}: unsupported record version")
+    if set(record) != (version_5_fields if version == 5 else old_fields):
+        raise InvalidImport(f"line {line_number}: expected event record fields")
     for field in ("id", "name"):
         value = record[field]
         if not isinstance(value, str) or not value:
@@ -1314,7 +1488,26 @@ def parse_event_import_record(
             raise InvalidImport(f"line {line_number}: invalid occurred_on") from None
         if parsed_date.isoformat() != occurred_on:
             raise InvalidImport(f"line {line_number}: invalid occurred_on")
-    return event_values(record)
+    reading_value = record.get("reading_value")
+    reading_unit = record.get("reading_unit")
+    if (reading_value is None) != (reading_unit is None):
+        raise InvalidImport(f"line {line_number}: reading fields must be paired")
+    if reading_value is not None:
+        if not isinstance(reading_value, str) or not isinstance(reading_unit, str):
+            raise InvalidImport(f"line {line_number}: invalid reading")
+        try:
+            parsed_reading = reading(reading_value + reading_unit)
+        except argparse.ArgumentTypeError:
+            raise InvalidImport(f"line {line_number}: invalid reading") from None
+        if parsed_reading != (reading_value, reading_unit):
+            raise InvalidImport(f"line {line_number}: reading must be canonical")
+    event = {
+        key: record[key]
+        for key in ("id", "name", "occurred_at", "occurred_on", "note")
+    }
+    event["reading_value"] = reading_value
+    event["reading_unit"] = reading_unit
+    return event
 
 
 def parse_correction_import_record(
@@ -1334,7 +1527,7 @@ def parse_correction_import_record(
         raise InvalidImport(f"line {line_number}: expected correction record fields")
     if (
         type(record["record_version"]) is not int
-        or record["record_version"] not in (2, 3, 4)
+        or record["record_version"] not in (2, 3, 4, 5)
     ):
         raise InvalidImport(f"line {line_number}: unsupported record version")
     for field in ("id", "target_id", "reason"):
@@ -1389,7 +1582,7 @@ def parse_activity_import_record(
         "expected_interval_days",
     }
     version_4_fields = {*version_3_fields, "display_name"}
-    if type(version) is not int or version not in (3, 4):
+    if type(version) is not int or version not in (3, 4, 5):
         raise InvalidImport(f"line {line_number}: unsupported record version")
     if set(record) != (version_3_fields if version == 3 else version_4_fields):
         raise InvalidImport(f"line {line_number}: expected activity record fields")
@@ -1462,7 +1655,8 @@ def import_event_record(
 ) -> None:
     existing = database.execute(
         """
-        SELECT id, name, occurred_at, occurred_on, note
+        SELECT id, name, occurred_at, occurred_on, note,
+               reading_value, reading_unit
         FROM events
         WHERE id = ?
         """,
@@ -1476,8 +1670,10 @@ def import_event_record(
         return
     database.execute(
         """
-        INSERT INTO events (id, name, occurred_at, occurred_on, note)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO events
+            (id, name, occurred_at, occurred_on, note,
+             reading_value, reading_unit)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event["id"],
@@ -1485,6 +1681,8 @@ def import_event_record(
             event["occurred_at"],
             event["occurred_on"],
             event["note"],
+            event["reading_value"],
+            event["reading_unit"],
         ),
     )
 
@@ -1720,7 +1918,8 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
         try:
             rows = database.execute(
                 """
-                SELECT id, name, occurred_at, occurred_on, note
+                SELECT id, name, occurred_at, occurred_on, note,
+                       reading_value, reading_unit
                 FROM events
                 ORDER BY rowid
                 """
@@ -1886,6 +2085,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"lastdone: error: {error}", file=sys.stderr)
         return 2
     except InvalidActivityUpdate as error:
+        print(f"lastdone: error: {error}", file=sys.stderr)
+        return 2
+    except InvalidReading as error:
         print(f"lastdone: error: {error}", file=sys.stderr)
         return 2
     except InvalidImport as error:

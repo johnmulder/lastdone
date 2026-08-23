@@ -65,7 +65,7 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.8.0\n", version.stdout)
+        self.assertEqual("lastdone 0.9.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
@@ -91,6 +91,18 @@ class CliContractTests(unittest.TestCase):
             ("add", "bad-date", "--date", "2026-02-29"),
             ("add", "compact-date", "--date", "20260821"),
             ("add", "future", "--date", "9999-12-31"),
+            ("add", "reading", "--reading", ""),
+            ("add", "reading", "--reading", "01mi"),
+            ("add", "reading", "--reading", ".5mi"),
+            ("add", "reading", "--reading", "1.mi"),
+            ("add", "reading", "--reading", "-1mi"),
+            ("add", "reading", "--reading", "+1mi"),
+            ("add", "reading", "--reading", "1e3mi"),
+            ("add", "reading", "--reading", "1MI"),
+            ("add", "reading", "--reading", "1 mi"),
+            ("add", "reading", "--reading", "1m_i"),
+            ("add", "reading", "--reading", "1mi--trip"),
+            ("add", "reading", "--allow-decrease"),
             ("--db", "", "list"),
             ("list", "--db", "somewhere.db"),
             ("export",),
@@ -99,6 +111,7 @@ class CliContractTests(unittest.TestCase):
             ("void", "event"),
             ("void", "event", "--reason", ""),
             ("replace", "event"),
+            ("replace", "event", "--reason", "reason", "--allow-decrease"),
             ("replace", "event", "--reason", "reason", "--note", "line\nbreak"),
             ("set", "name"),
             ("set", "name", "--display-name", ""),
@@ -264,11 +277,208 @@ class CliContractTests(unittest.TestCase):
                 "occurred_at": event["occurred_at"],
                 "occurred_on": None,
                 "note": None,
+                "reading_value": None,
+                "reading_unit": None,
             },
             event,
         )
         UUID(str(event["id"]))
         self.assertRegex(str(event["occurred_at"]), TIMESTAMP)
+
+    def test_readings_are_canonical_and_show_exact_unit_changes(self) -> None:
+        older = self.add_json(
+            "oil-change",
+            "--date",
+            "2026-01-01",
+            "--reading",
+            "80800.00mi",
+        )
+        latest = self.add_json(
+            "oil-change",
+            "--date",
+            "2026-02-01",
+            "--reading",
+            "84221.500mi",
+        )
+        self.assertEqual(
+            ("80800", "mi"),
+            (older["reading_value"], older["reading_unit"]),
+        )
+        self.assertEqual(
+            ("84221.5", "mi"),
+            (latest["reading_value"], latest["reading_unit"]),
+        )
+
+        summary = json.loads(
+            self.run_cli("show", "oil-change", "--jsonl").stdout
+        )
+        self.assertEqual("84221.5", summary["reading_value"])
+        self.assertEqual("mi", summary["reading_unit"])
+        self.assertEqual("3421.5", summary["reading_change"])
+        self.assertIn(
+            "Reading: 84221.5mi (+3421.5mi)\n",
+            self.run_cli("show", "oil-change").stdout,
+        )
+        history = self.run_cli("history", "oil-change")
+        self.assertIn(f"{latest['id']}  2026-02-01  84221.5mi\n", history.stdout)
+        self.assertIn(f"{older['id']}  2026-01-01  80800mi\n", history.stdout)
+
+        different_unit = self.add_json(
+            "oil-change",
+            "--date",
+            "2026-03-01",
+            "--reading",
+            "10km",
+        )
+        self.assertEqual("km", different_unit["reading_unit"])
+        summary = json.loads(
+            self.run_cli("show", "oil-change", "--jsonl").stdout
+        )
+        self.assertEqual("10", summary["reading_value"])
+        self.assertEqual("km", summary["reading_unit"])
+        self.assertIsNone(summary["reading_change"])
+
+        self.add_json(
+            "precision",
+            "--date",
+            "2026-01-01",
+            "--reading",
+            "9999999999999999999999999999.99cycles",
+        )
+        self.add_json(
+            "precision",
+            "--date",
+            "2026-02-01",
+            "--reading",
+            "10000000000000000000000000000.01cycles",
+        )
+        precise = json.loads(
+            self.run_cli("show", "precision", "--jsonl").stdout
+        )
+        self.assertEqual("0.02", precise["reading_change"])
+
+    def test_decreasing_and_out_of_order_readings_require_confirmation(
+        self,
+    ) -> None:
+        self.add_json("meter", "--date", "2026-01-01", "--reading", "100mi")
+        rejected = self.run_cli(
+            "add", "meter", "--date", "2026-02-01", "--reading", "90mi"
+        )
+        self.assertEqual(2, rejected.returncode)
+        self.assertIn("use --allow-decrease", rejected.stderr)
+        self.assertEqual(
+            1,
+            len(self.run_cli("history", "meter", "--jsonl").stdout.splitlines()),
+        )
+
+        reset = self.add_json(
+            "meter",
+            "--date",
+            "2026-02-01",
+            "--reading",
+            "90mi",
+            "--allow-decrease",
+        )
+        reset_summary = json.loads(
+            self.run_cli("show", "meter", "--jsonl").stdout
+        )
+        self.assertEqual("-10", reset_summary["reading_change"])
+        self.assertIn("Reading: 90mi (-10mi)\n", self.run_cli("show", "meter").stdout)
+
+        self.add_json("meter", "--date", "2026-03-01", "--reading", "95mi")
+        middle = self.add_json(
+            "meter", "--date", "2026-02-15", "--reading", "92mi"
+        )
+        self.assertEqual("92", middle["reading_value"])
+        for value in ("85mi", "99mi"):
+            with self.subTest(value=value):
+                result = self.run_cli(
+                    "add",
+                    "meter",
+                    "--date",
+                    "2026-02-15",
+                    "--reading",
+                    value,
+                )
+                self.assertEqual(2, result.returncode)
+        records = self.run_cli("history", "meter", "--jsonl").stdout.splitlines()
+        self.assertEqual(4, len(records))
+        self.assertIn(reset["id"], [json.loads(record)["id"] for record in records])
+
+        exported = self.run_cli("export", "--jsonl").stdout
+        imported_path = self.data_home / "confirmed-reset" / "last.db"
+        imported_arguments = ("--db", str(imported_path))
+        imported = self.run_cli(
+            *imported_arguments,
+            "import",
+            "--jsonl",
+            input_text=exported,
+        )
+        self.assertEqual(0, imported.returncode, imported.stderr)
+        self.assertEqual(
+            exported,
+            self.run_cli(*imported_arguments, "export", "--jsonl").stdout,
+        )
+
+    def test_replace_preserves_and_validates_readings(self) -> None:
+        self.add_json("meter", "--date", "2026-01-01", "--reading", "100mi")
+        target = self.add_json(
+            "meter", "--date", "2026-02-01", "--reading", "110mi"
+        )
+        rejected = self.run_cli(
+            "replace",
+            str(target["id"]),
+            "--reason",
+            "meter reset",
+            "--reading",
+            "90mi",
+            "--jsonl",
+        )
+        self.assertEqual(2, rejected.returncode)
+        self.assertEqual("", rejected.stdout)
+
+        accepted = self.run_cli(
+            "replace",
+            str(target["id"]),
+            "--reason",
+            "meter reset",
+            "--reading",
+            "90mi",
+            "--allow-decrease",
+            "--jsonl",
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        replacement_id = json.loads(accepted.stdout)["replacement_id"]
+        replacement = json.loads(
+            self.run_cli("history", "meter", "--jsonl").stdout.splitlines()[0]
+        )
+        self.assertEqual(replacement_id, replacement["id"])
+        self.assertEqual(
+            ("90", "mi"),
+            (replacement["reading_value"], replacement["reading_unit"]),
+        )
+        summary = json.loads(self.run_cli("show", "meter", "--jsonl").stdout)
+        self.assertEqual("-10", summary["reading_change"])
+
+        preserved = self.run_cli(
+            "replace",
+            str(replacement_id),
+            "--reason",
+            "add note",
+            "--note",
+            "confirmed",
+            "--allow-decrease",
+            "--jsonl",
+        )
+        self.assertEqual(0, preserved.returncode, preserved.stderr)
+        newest = json.loads(
+            self.run_cli("history", "meter", "--jsonl").stdout.splitlines()[0]
+        )
+        self.assertEqual("confirmed", newest["note"])
+        self.assertEqual(
+            ("90", "mi"),
+            (newest["reading_value"], newest["reading_unit"]),
+        )
 
     def test_export_import_round_trip_is_lossless_and_idempotent(self) -> None:
         instant = self.add_json("instant")
@@ -286,7 +496,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual("", exported.stderr)
         records = [json.loads(line) for line in exported.stdout.splitlines()]
         self.assertEqual([instant["id"], dated["id"]], [r["id"] for r in records])
-        self.assertTrue(all(record["record_version"] == 4 for record in records))
+        self.assertTrue(all(record["record_version"] == 5 for record in records))
         self.assertTrue(all("schema_version" not in record for record in records))
         self.assertEqual("line one · line two — café", records[1]["note"])
 
@@ -433,7 +643,7 @@ class CliContractTests(unittest.TestCase):
             ["event", "event", "correction", "correction", "activity"],
             [record["type"] for record in records],
         )
-        self.assertTrue(all(record["record_version"] == 4 for record in records))
+        self.assertTrue(all(record["record_version"] == 5 for record in records))
         self.assertEqual(
             [replacement["id"], void_correction["id"]],
             [record["id"] for record in records[2:4]],
@@ -556,7 +766,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(
             {
                 **activity,
-                "record_version": 4,
+                "record_version": 5,
                 "display_name": None,
             },
             json.loads(baseline),
@@ -636,6 +846,47 @@ class CliContractTests(unittest.TestCase):
             "",
             "[" * 2_000 + "]" * 2_000,
             json.dumps({**base, "record_version": 5}),
+            json.dumps({**base, "record_version": 6}),
+            json.dumps(
+                {
+                    **base,
+                    "record_version": 5,
+                    "reading_value": "1",
+                    "reading_unit": None,
+                }
+            ),
+            json.dumps(
+                {
+                    **base,
+                    "record_version": 5,
+                    "reading_value": None,
+                    "reading_unit": "mi",
+                }
+            ),
+            json.dumps(
+                {
+                    **base,
+                    "record_version": 5,
+                    "reading_value": "1.0",
+                    "reading_unit": "mi",
+                }
+            ),
+            json.dumps(
+                {
+                    **base,
+                    "record_version": 5,
+                    "reading_value": 1,
+                    "reading_unit": "mi",
+                }
+            ),
+            json.dumps(
+                {
+                    **base,
+                    "record_version": 5,
+                    "reading_value": "1",
+                    "reading_unit": "MI",
+                }
+            ),
             json.dumps({**base, "occurred_at": "2024-02-29T00:00:00.000000Z"}),
             json.dumps({**base, "occurred_on": "2026-02-29"}),
             json.dumps({**base, "name": "event\n"}),
@@ -800,7 +1051,16 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(0, imported.returncode, imported.stderr)
         exported = self.run_cli(*arguments, "export", "--jsonl")
         self.assertEqual(
-            [event, correction, activity],
+            [
+                {
+                    **event,
+                    "record_version": 5,
+                    "reading_value": None,
+                    "reading_unit": None,
+                },
+                {**correction, "record_version": 5},
+                {**activity, "record_version": 5},
+            ],
             [json.loads(line) for line in exported.stdout.splitlines()],
         )
         before = database_path.read_bytes()
@@ -986,6 +1246,9 @@ class CliContractTests(unittest.TestCase):
                     "occurred_on": None,
                 },
                 "interval_days": 0,
+                "reading_value": None,
+                "reading_unit": None,
+                "reading_change": None,
                 "occurrences": 2,
             },
             summary,
@@ -1000,6 +1263,7 @@ class CliContractTests(unittest.TestCase):
                     f"Last: {date}",
                     f"Previous: {date}",
                     "Interval: 0 days",
+                    "Reading: -",
                     "Occurrences: 2",
                     "",
                 )
@@ -1015,7 +1279,7 @@ class CliContractTests(unittest.TestCase):
 
         human_history = self.run_cli("history", "furnace-filter")
         self.assertEqual(
-            f"{second['id']}  {date}\n{first['id']}  {date}\n",
+            f"{second['id']}  {date}  -\n{first['id']}  {date}  -\n",
             human_history.stdout,
         )
         self.assertEqual("", human_history.stderr)
@@ -1060,7 +1324,9 @@ class CliContractTests(unittest.TestCase):
         human_audit = self.run_cli(
             "history", "filter", "--include-corrections"
         )
-        self.assertIn(f"event {latest['id']} 2024-02-01\n", human_audit.stdout)
+        self.assertIn(
+            f"event {latest['id']} 2024-02-01 -\n", human_audit.stdout
+        )
         self.assertIn(
             f"correction {correction['id']} void {latest['id']} - ",
             human_audit.stdout,
@@ -1190,7 +1456,10 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(1, record["occurrences"])
 
         human = self.run_cli("show", "single")
-        self.assertIn("\nPrevious: -\nInterval: -\nOccurrences: 1\n", human.stdout)
+        self.assertIn(
+            "\nPrevious: -\nInterval: -\nReading: -\nOccurrences: 1\n",
+            human.stdout,
+        )
 
     def test_date_only_event_is_explicit_and_timezone_independent(self) -> None:
         event = self.add_json("leap-day", "--date", "2024-02-29")
@@ -1203,6 +1472,8 @@ class CliContractTests(unittest.TestCase):
                 "occurred_at": None,
                 "occurred_on": "2024-02-29",
                 "note": None,
+                "reading_value": None,
+                "reading_unit": None,
             },
             event,
         )
@@ -1224,10 +1495,12 @@ class CliContractTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     "leap-day\nLast: 2024-02-29\nPrevious: -\n"
-                    "Interval: -\nOccurrences: 1\n",
+                    "Interval: -\nReading: -\nOccurrences: 1\n",
                     summary.stdout,
                 )
-                self.assertEqual(f"{event['id']}  2024-02-29\n", history.stdout)
+                self.assertEqual(
+                    f"{event['id']}  2024-02-29  -\n", history.stdout
+                )
 
     def test_mixed_precision_order_and_dst_interval_use_local_dates(self) -> None:
         date_event = self.add_json("mixed", "--date", "2026-03-08")
@@ -1326,6 +1599,7 @@ class CliContractTests(unittest.TestCase):
                 ("trailing-zero", "1.0", "mi"),
                 ("empty-unit", "1", ""),
                 ("upper-unit", "1", "MI"),
+                ("digit-unit", "1", "co2"),
                 ("leading-hyphen", "1", "-mi"),
                 ("trailing-hyphen", "1", "mi-"),
                 ("double-hyphen", "1", "engine--h"),
@@ -1663,6 +1937,8 @@ class CliContractTests(unittest.TestCase):
                 "occurred_at": "2026-08-21T20:32:00.000000Z",
                 "occurred_on": None,
                 "note": "preserved",
+                "reading_value": None,
+                "reading_unit": None,
             },
             json.loads(result.stdout),
         )

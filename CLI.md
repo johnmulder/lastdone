@@ -48,11 +48,11 @@ SQLite's signed integer range. Options not shown above are invalid; `add --note`
 remains outside this contract.
 
 `VALUEUNIT` joins one non-negative decimal and one exact unit with no separator.
-The decimal matches `(0|[1-9][0-9]*)(\.[0-9]+)?`; the unit starts with a
-lowercase ASCII letter and continues with lowercase letters, digits, or
-non-adjacent internal hyphens. Fractional trailing zeroes are removed before
-storage. Signs, exponents, whitespace, leading zeroes, uppercase units, and
-non-ASCII spellings are invalid. Units are compared exactly and never converted.
+The decimal matches `(0|[1-9][0-9]*)(\.[0-9]+)?`; the unit contains lowercase
+ASCII letters with optional non-adjacent internal hyphens. Fractional trailing
+zeroes are removed before storage. Signs, exponents, whitespace, leading zeroes,
+uppercase units, and non-ASCII spellings are invalid. Units are compared exactly
+and never converted.
 
 ## Common behavior
 
