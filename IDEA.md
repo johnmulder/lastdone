@@ -302,6 +302,7 @@ Optional metadata describes an activity.
 ```text
 name
 expected_interval
+display_name
 description
 tags
 ```
@@ -312,6 +313,7 @@ Example:
 {
   "name": "furnace-filter",
   "expected_interval": "90d",
+  "display_name": "Filtre à air 🏠",
   "description": "Replace main HVAC return filter",
   "tags": ["house", "maintenance"]
 }
@@ -374,6 +376,12 @@ Expected intervals should be optional activity metadata measured only in whole
 calendar days. Due calculations use the process's current local date and the
 latest effective event's displayed date; they do not schedule work or measure
 elapsed hours. A configured activity remains meaningful before its first event.
+
+Activity command identifiers should be exact lowercase ASCII keys. Optional
+human display names and notes remain Unicode, are normalized to NFC when entered
+interactively, and are never used as lookup keys. Imports preserve printable
+legacy deviations so migration cannot silently merge or rewrite user data;
+`doctor` reports invalid stored keys and non-NFC human text.
 
 ---
 
@@ -459,11 +467,20 @@ CREATE TABLE corrections (
 CREATE TABLE activities (
     name TEXT NOT NULL PRIMARY KEY
         CONSTRAINT activities_name_nonempty CHECK (length(name) > 0),
-    expected_interval_days INTEGER NOT NULL
+    expected_interval_days INTEGER
         CONSTRAINT activities_interval_positive CHECK (
-            typeof(expected_interval_days) = 'integer'
-            AND expected_interval_days > 0
-        )
+            expected_interval_days IS NULL OR (
+                typeof(expected_interval_days) = 'integer'
+                AND expected_interval_days > 0
+            )
+        ),
+    display_name TEXT
+        CONSTRAINT activities_display_name_nonempty CHECK (
+            display_name IS NULL OR length(display_name) > 0
+        ),
+    CONSTRAINT activities_metadata_present CHECK (
+        expected_interval_days IS NOT NULL OR display_name IS NOT NULL
+    )
 );
 ```
 
@@ -473,7 +490,7 @@ Tags can be postponed until there is a demonstrated use case.
 
 ## Naming
 
-Activity names should behave like lightweight Unix identifiers:
+Activity keys are lightweight Unix identifiers:
 
 ```text
 furnace-filter
@@ -482,12 +499,18 @@ coffee-machine-clean
 xander-nail-trim
 ```
 
-Recommended normalization:
+The exact grammar is `[a-z0-9]+(?:-[a-z0-9]+)*`:
 
-- lowercase;
-- hyphen-separated;
-- ASCII by default;
-- exact names stored and queried consistently.
+- lowercase ASCII letters and digits;
+- single internal hyphens;
+- no leading, trailing, or repeated hyphen;
+- exact keys stored and queried consistently without implicit rewriting.
+
+An optional display name carries NFC-normalized Unicode for human output while
+machine output and commands continue to use the key. Imported legacy keys remain
+unchanged and are reported by `doctor` when they violate the grammar. NUL and
+terminal control characters are rejected at text boundaries; imports preserve
+printable non-NFC text verbatim so `doctor` can report it without data loss.
 
 Avoid forcing a taxonomy prematurely.
 
@@ -574,9 +597,9 @@ remain deferred until recurring maintenance work demonstrates a need.
 ### Required
 
 ```text
-lastdone add NAME
-lastdone show NAME
-lastdone history NAME
+lastdone add KEY
+lastdone show KEY
+lastdone history KEY
 lastdone list
 ```
 
@@ -591,10 +614,10 @@ Plus:
 ### Nice immediately after MVP
 
 ```text
-lastdone set NAME --every INTERVAL
+lastdone set KEY --every INTERVAL
 lastdone due
-lastdone add NAME --date DATE
-lastdone add NAME --note TEXT
+lastdone add KEY --date DATE
+lastdone add KEY --note TEXT
 ```
 
 ### Explicitly defer

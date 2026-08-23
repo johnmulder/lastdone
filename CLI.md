@@ -8,14 +8,14 @@ change.
 ## Invocation
 
 ```text
-lastdone [--db PATH] add NAME [--date YYYY-MM-DD] [--jsonl]
-lastdone [--db PATH] show NAME [--jsonl]
-lastdone [--db PATH] history NAME [--include-corrections] [--jsonl]
+lastdone [--db PATH] add KEY [--date YYYY-MM-DD] [--jsonl]
+lastdone [--db PATH] show KEY [--jsonl]
+lastdone [--db PATH] history KEY [--include-corrections] [--jsonl]
 lastdone [--db PATH] list [--jsonl]
 lastdone [--db PATH] void EVENT_ID --reason TEXT [--jsonl]
 lastdone [--db PATH] replace EVENT_ID --reason TEXT
-         [--name NAME] [--date YYYY-MM-DD] [--note TEXT] [--jsonl]
-lastdone [--db PATH] set NAME --every Nd [--jsonl]
+         [--name KEY] [--date YYYY-MM-DD] [--note TEXT] [--jsonl]
+lastdone [--db PATH] set KEY [--every Nd] [--display-name TEXT] [--jsonl]
 lastdone [--db PATH] due [--overdue] [--jsonl]
 lastdone [--db PATH] export --jsonl
 lastdone [--db PATH] import --jsonl
@@ -24,14 +24,18 @@ lastdone --help
 lastdone --version
 ```
 
-`NAME` is one non-empty, printable command argument. Version 2 does not otherwise
-normalize or restrict names. The activity-key proposal will define a stricter
-grammar.
+`KEY` is one exact lowercase ASCII activity key matching
+`[a-z0-9]+(?:-[a-z0-9]+)*`. Commands never lowercase, transliterate, or otherwise
+rewrite it. Imported legacy keys outside this grammar are preserved and reported
+by `doctor`, but cannot be supplied to interactive activity-key arguments.
 
 `--date` accepts only a real ISO 8601 calendar date in `YYYY-MM-DD` form. Future
-dates are invalid because `lastdone` records completed actions. `EVENT_ID` and
-correction reasons are non-empty printable text. Replacement notes are printable
-text and may be empty. The global `--db` option must appear before the command.
+dates are invalid because `lastdone` records completed actions. `EVENT_ID`,
+display names, and correction reasons are non-empty printable text. Replacement
+notes are printable text and may be empty. CLI-supplied display names, reasons,
+and notes are normalized to Unicode NFC before storage. NUL and all other
+non-printable/control characters are invalid in every text field. The global
+`--db` option must appear before the command.
 `Nd` is an ASCII, non-zero decimal integer followed immediately by lowercase
 `d`. It has no sign, whitespace, leading zero, or other unit and must fit
 SQLite's signed integer range. Options not shown above are invalid; `add --note`
@@ -72,12 +76,13 @@ holding the write lock so concurrent first runs cannot apply the same migration.
 If the timeout expires, the command returns 3 with a storage diagnostic that
 identifies the busy database and advises retrying.
 
-The database schema uses `PRAGMA user_version`; the current schema version is 3.
+The database schema uses `PRAGMA user_version`; the current schema version is 4.
 Migrations run forward in numbered transactions before the requested command.
 Before rebuilding an existing unversioned database, `lastdone` creates
-`last.db.v0.bak` with mode 0600 and never overwrites it. A newer schema version,
-an unrecognized schema, or schema drift is a storage error and returns 3 without
-mutating the database.
+`last.db.v0.bak`; before rebuilding schema 3 activity metadata, it creates
+`last.db.v3.bak`. Both use mode 0600 and are never overwritten. A newer schema
+version, an unrecognized schema, or schema drift is a storage error and returns
+3 without mutating the database.
 
 ## JSONL records
 
@@ -98,6 +103,7 @@ Produced by `add --jsonl` and once per occurrence by `history --jsonl`:
 ```
 
 - `id` is a UUID string unique to the event.
+- `name` is the stable activity key.
 - Exactly one of `occurred_at` and `occurred_on` is non-null.
 - `occurred_at` is an RFC 3339 UTC instant with six fractional digits and `Z`.
 - `occurred_on` is an ISO 8601 calendar date with no implied time or timezone.
@@ -108,31 +114,33 @@ Produced by `add --jsonl` and once per occurrence by `history --jsonl`:
 Produced once by `show --jsonl`:
 
 ```json
-{"schema_version":2,"type":"summary","name":"furnace-filter","last":{"occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null},"previous":{"occurred_at":null,"occurred_on":"2026-05-14"},"interval_days":99,"occurrences":5}
+{"schema_version":2,"type":"summary","name":"furnace-filter","display_name":"Filtre à air 🏠","last":{"occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null},"previous":{"occurred_at":null,"occurred_on":"2026-05-14"},"interval_days":99,"occurrences":5}
 ```
 
 `previous` and `interval_days` are null when only one event exists. Each
 occurrence object has the same exactly-one rule as an event. The interval is the
 difference between the two displayed calendar dates, not elapsed 24-hour blocks.
+`display_name` is NFC-normalized configured human text or null.
 
 ### Activity
 
 Produced once per distinct name by `list --jsonl`:
 
 ```json
-{"schema_version":2,"type":"activity","name":"furnace-filter","expected_interval_days":90}
+{"schema_version":2,"type":"activity","name":"furnace-filter","expected_interval_days":90,"display_name":"Filtre à air 🏠"}
 ```
 
-`expected_interval_days` is a positive integer when configured and null for a
-name known only from effective events. `set --jsonl` emits the configured
-activity record.
+`expected_interval_days` is a positive integer when configured and null when no
+interval is set. `display_name` is configured human text or null. A name known
+only from effective events has both null. `set --jsonl` emits the stored activity
+record.
 
 ### Due
 
 Produced once per configured activity by `due --jsonl`, subject to filtering:
 
 ```json
-{"schema_version":2,"type":"due","name":"furnace-filter","expected_interval_days":90,"last":{"occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null},"due_on":"2026-11-19","state":"not-due"}
+{"schema_version":2,"type":"due","name":"furnace-filter","expected_interval_days":90,"display_name":"Filtre à air 🏠","last":{"occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null},"due_on":"2026-11-19","state":"not-due"}
 ```
 
 `last` preserves the effective latest event's occurrence precision and is null
@@ -159,45 +167,51 @@ an RFC 3339 UTC instant with six fractional digits.
 Produced once by `doctor --jsonl`:
 
 ```json
-{"schema_version":2,"type":"doctor","database":"/home/me/.local/share/last/last.db","database_schema_version":3,"schema":"ok","integrity":"ok","permissions":"ok","parseability":"ok","events":5,"corrections":1,"activities":2,"status":"ok"}
+{"schema_version":2,"type":"doctor","database":"/home/me/.local/share/last/last.db","database_schema_version":4,"schema":"ok","integrity":"ok","permissions":"ok","parseability":"ok","conventions":"ok","convention_issues":[],"events":5,"corrections":1,"activities":2,"status":"ok"}
 ```
 
 `status` is `ok` only when every applicable check passes. On non-POSIX systems,
 `permissions` is `not-applicable`. `database_schema_version`, `events`,
 `corrections`, or `activities` is null when that value cannot be read safely.
+`conventions` is `problems` when `convention_issues` reports invalid stored keys,
+control characters, or non-NFC human text; these checks never rewrite data.
 
 Adding a field is backward-compatible. Removing a field, renaming a field, or
 changing a field's meaning requires a new `schema_version`.
 
 ## Interchange records
 
-`export --jsonl` emits lossless record version 3:
+`export --jsonl` emits lossless record version 4:
 
 ```json
-{"record_version":3,"type":"event","id":"550e8400-e29b-41d4-a716-446655440000","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null,"note":null}
-{"record_version":3,"type":"correction","id":"c8f8c768-7b2d-4985-a080-b58a94d3933c","kind":"replace","target_id":"550e8400-e29b-41d4-a716-446655440000","replacement_id":"ee481866-5e5f-4fc2-b6d1-a2f0e4d60cec","reason":"wrong date","corrected_at":"2026-08-22T18:00:00.000000Z"}
-{"record_version":3,"type":"activity","name":"furnace-filter","expected_interval_days":90}
+{"record_version":4,"type":"event","id":"550e8400-e29b-41d4-a716-446655440000","name":"furnace-filter","occurred_at":"2026-08-21T20:32:00.000000Z","occurred_on":null,"note":null}
+{"record_version":4,"type":"correction","id":"c8f8c768-7b2d-4985-a080-b58a94d3933c","kind":"replace","target_id":"550e8400-e29b-41d4-a716-446655440000","replacement_id":"ee481866-5e5f-4fc2-b6d1-a2f0e4d60cec","reason":"wrong date","corrected_at":"2026-08-22T18:00:00.000000Z"}
+{"record_version":4,"type":"activity","name":"furnace-filter","expected_interval_days":90,"display_name":"Filtre à air 🏠"}
 ```
 
-Version 3 event records require the same seven fields as versions 1 and 2;
+Version 4 event records require the same seven fields as versions 1 through 3;
 only `record_version` changes. `id` and `name` are non-empty strings; `note` is
 a string or null. Exactly one occurrence field is populated. An exact timestamp
 has six fractional digits and `Z`; a calendar date is real `YYYY-MM-DD`.
 
-Version 3 correction records require exactly the eight fields shown, unchanged
-from version 2. IDs and reasons are non-empty strings, timestamps use the exact
-event timestamp form, and kind/link combinations follow the command-result
+Version 4 correction records require exactly the eight fields shown, unchanged
+from versions 2 and 3. IDs and reasons are non-empty strings, timestamps use the
+exact event timestamp form, and kind/link combinations follow the command-result
 correction rules. Events must precede corrections that reference them. Version
-3 activity records require exactly the four fields shown, with a non-empty name
-and positive integer interval. Import continues to accept version 1 and 2 event
-records and version 2 corrections. Interchange versions are independent of
-command-result `schema_version` values and SQLite schema versions.
+4 activity records require exactly the five fields shown. The name is non-empty;
+the interval is null or a positive integer; the display name is null or non-empty
+printable text; and at least one metadata value is present. Version 3 activities
+map to a null display name. Import continues to accept versions 1-3 events and
+versions 2-3 corrections. Printable non-ASCII keys and non-NFC human text are
+preserved for compatibility and reported by `doctor`, while control characters
+are rejected. Interchange versions are independent of command-result
+`schema_version` values and SQLite schema versions.
 
 ## Commands
 
 ### `add`
 
-`add NAME` records a new event at the current UTC instant. `add NAME --date DATE`
+`add KEY` records a new event at the current UTC instant. `add KEY --date DATE`
 records only that calendar date; it never invents midnight or a timezone.
 Repeating either command records another event, because duplicates are valid
 history and receive different IDs.
@@ -209,7 +223,7 @@ Human mode is silent on success. JSONL mode emits the new event record.
 Human output is:
 
 ```text
-furnace-filter
+Filtre à air 🏠 [furnace-filter]
 Last: 2026-08-21
 Previous: 2026-05-14
 Interval: 99 days
@@ -220,7 +234,8 @@ For one event, the `Previous` and `Interval` values are `-`. Exact instants are
 rendered in the process's local timezone; date-only events render their stored
 date unchanged. JSONL mode emits one summary record that preserves both kinds.
 Corrected targets never contribute to the summary; their effective replacements
-do.
+do. The first human line is `DISPLAY_NAME [KEY]` when configured and otherwise
+just `KEY`.
 
 A missing activity returns 1 and writes this diagnostic:
 
@@ -235,7 +250,7 @@ emits one effective event record per line. Both order by displayed calendar date
 newest first. Exact instants precede date-only events on the same date;
 otherwise-equal events use most recent insertion first.
 
-`--include-corrections` emits all events stored under `NAME`, including corrected
+`--include-corrections` emits all events stored under `KEY`, including corrected
 targets, plus events directly linked to them by corrections. Events use insertion
 order, followed by the directly related corrections in correction order. Human
 audit lines begin with `event` or `correction`; JSONL uses the event and
@@ -245,8 +260,8 @@ A missing activity has the same behavior as missing `show` output.
 
 ### `list`
 
-Human mode emits one distinct activity name per line. JSONL mode emits one
-activity record per line. Names are ordered by their UTF-8 byte values. Duplicate
+Human mode emits `KEY` or `KEY  DISPLAY_NAME` per line. JSONL mode emits one
+activity record per line. Keys are ordered by their UTF-8 byte values. Duplicate
 events never duplicate a list entry.
 
 Effective events and configured activity metadata contribute names. Replacing
@@ -275,10 +290,12 @@ using its own ID. Corrections cannot be changed or deleted.
 
 ### `set`
 
-`set NAME --every Nd` stores one expected whole-calendar-day interval. It is an
-idempotent upsert and can configure a name with no events. It does not schedule
-a task, migrate metadata after `replace --name`, or accept calendar months.
-Human mode is silent; JSONL emits the configured activity record.
+`set KEY [--every Nd] [--display-name TEXT]` stores one or both metadata values;
+at least one option is required. It is an idempotent upsert, preserves an omitted
+existing value, and can configure a key with no events. Display names are stored
+in NFC. It does not clear metadata, rename a key, schedule a task, migrate
+metadata after `replace --name`, or accept calendar months. Human mode is silent;
+JSONL emits the stored activity record.
 
 ### `due`
 
@@ -293,7 +310,7 @@ activities; a date beyond year 9999 is null and `not-due`.
 Human lines use:
 
 ```text
-NAME  LAST_DATE|-  Nd  DUE_ON|-  STATE
+KEY  DISPLAY_NAME|-  LAST_DATE|-  Nd  DUE_ON|-  STATE
 ```
 
 The human state is the uppercase machine-state spelling. `--overdue` emits only
@@ -302,7 +319,7 @@ the exit code.
 
 ### `export`
 
-`export --jsonl` writes every interchange version 3 event oldest-insertion first,
+`export --jsonl` writes every interchange version 4 event oldest-insertion first,
 then every correction in correction order, then activity metadata by name. It
 streams directly from SQLite and includes every durable field. An empty database
 emits no output successfully.
@@ -315,18 +332,20 @@ without loading it into memory. An existing identical ID is a no-op. An ID with
 different content, malformed JSON, blank line, unsupported record version, or
 invalid field or link rolls back the entire import and returns 2 with a diagnostic
 that begins `lastdone: import error: line N:`. Corrections must follow their
-target and replacement events. Version 1 event-only and version 2 event and
-correction streams remain valid. Activity metadata is accepted in version 3
-streams and is idempotent by name; a different interval for an existing name is
-a conflict that rolls back the stream.
+target and replacement events. Older supported streams remain valid. Activity
+metadata is idempotent by key; different stored metadata for an existing key is
+a conflict that rolls back the stream. Printable legacy keys and non-NFC text
+are preserved verbatim, while control characters are rejected.
 
 ### `doctor`
 
 `doctor` opens the selected database read-only and never creates, migrates, or
 repairs it. It reports the absolute database path, schema version and structure,
 SQLite integrity, database-file permissions, event and correction parseability,
-activity metadata parseability, all three counts, and overall status. Human
-output uses one labeled line per value; `--jsonl` emits the doctor record above.
+activity metadata parseability, key/text convention deviations, all three
+counts, and overall status. Invalid stored keys and non-NFC text are reported
+without mutation. Human output uses labeled lines; `--jsonl` emits the doctor
+record above.
 
 A healthy report returns 0. A completed report with problems returns 3. A
 missing or inaccessible database is a storage error, returns 3, emits no report,
@@ -338,7 +357,7 @@ Help returns 0, writes usage text to stdout, and writes nothing to stderr.
 Version returns 0 and writes exactly:
 
 ```text
-lastdone 0.7.0
+lastdone 0.8.0
 ```
 
 ## Exit codes
