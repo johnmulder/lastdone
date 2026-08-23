@@ -190,11 +190,11 @@ def parse_args(
     list_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
     list_command.set_defaults(handler=list_activities)
 
-    export_command = commands.add_parser("export", help="export all events")
+    export_command = commands.add_parser("export", help="export all records")
     export_command.add_argument("--jsonl", action="store_true", required=True)
     export_command.set_defaults(handler=export_events)
 
-    import_command = commands.add_parser("import", help="import events")
+    import_command = commands.add_parser("import", help="import records")
     import_command.add_argument("--jsonl", action="store_true", required=True)
     import_command.set_defaults(handler=import_events)
 
@@ -536,7 +536,13 @@ def correction_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 
 def interchange_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    return {"record_version": 1, "type": "event", **event_values(row)}
+    return {"record_version": 2, "type": "event", **event_values(row)}
+
+
+def correction_interchange_record(
+    row: sqlite3.Row | dict[str, Any],
+) -> dict[str, Any]:
+    return {"record_version": 2, "type": "correction", **correction_values(row)}
 
 
 def emit_json(record: dict[str, Any]) -> None:
@@ -866,6 +872,15 @@ def export_events(database: sqlite3.Connection, args: argparse.Namespace) -> int
     )
     for row in rows:
         emit_json(interchange_record(row))
+    corrections = database.execute(
+        """
+        SELECT id, kind, target_id, replacement_id, reason, corrected_at
+        FROM corrections
+        ORDER BY rowid
+        """
+    )
+    for correction in corrections:
+        emit_json(correction_interchange_record(correction))
     return 0
 
 
@@ -879,12 +894,9 @@ def valid_import_timestamp(value: str) -> bool:
     return current_timestamp(parsed) == value
 
 
-def parse_import_record(line: str, line_number: int) -> dict[str, Any]:
-    try:
-        record = json.loads(line)
-    except (json.JSONDecodeError, UnicodeError, RecursionError):
-        raise InvalidImport(f"line {line_number}: invalid JSON") from None
-
+def parse_event_import_record(
+    record: dict[str, Any], line_number: int
+) -> dict[str, Any]:
     fields = {
         "record_version",
         "type",
@@ -894,12 +906,13 @@ def parse_import_record(line: str, line_number: int) -> dict[str, Any]:
         "occurred_on",
         "note",
     }
-    if not isinstance(record, dict) or set(record) != fields:
+    if set(record) != fields:
         raise InvalidImport(f"line {line_number}: expected event record fields")
-    if type(record["record_version"]) is not int or record["record_version"] != 1:
+    if (
+        type(record["record_version"]) is not int
+        or record["record_version"] not in (1, 2)
+    ):
         raise InvalidImport(f"line {line_number}: unsupported record version")
-    if record["type"] != "event":
-        raise InvalidImport(f"line {line_number}: type must be event")
     for field in ("id", "name"):
         value = record[field]
         if not isinstance(value, str) or not value:
@@ -938,39 +951,183 @@ def parse_import_record(line: str, line_number: int) -> dict[str, Any]:
     return event_values(record)
 
 
+def parse_correction_import_record(
+    record: dict[str, Any], line_number: int
+) -> dict[str, Any]:
+    fields = {
+        "record_version",
+        "type",
+        "id",
+        "kind",
+        "target_id",
+        "replacement_id",
+        "reason",
+        "corrected_at",
+    }
+    if set(record) != fields:
+        raise InvalidImport(f"line {line_number}: expected correction record fields")
+    if type(record["record_version"]) is not int or record["record_version"] != 2:
+        raise InvalidImport(f"line {line_number}: unsupported record version")
+    for field in ("id", "target_id", "reason"):
+        value = record[field]
+        if not isinstance(value, str) or not value:
+            raise InvalidImport(
+                f"line {line_number}: {field} must be a non-empty string"
+            )
+    kind = record["kind"]
+    replacement_id = record["replacement_id"]
+    if kind not in ("void", "replace"):
+        raise InvalidImport(f"line {line_number}: invalid correction kind")
+    if kind == "void" and replacement_id is not None:
+        raise InvalidImport(f"line {line_number}: void cannot have a replacement")
+    if kind == "replace" and (
+        not isinstance(replacement_id, str) or not replacement_id
+    ):
+        raise InvalidImport(f"line {line_number}: replace requires a replacement")
+    if replacement_id == record["target_id"]:
+        raise InvalidImport(f"line {line_number}: correction must link distinct events")
+    corrected_at = record["corrected_at"]
+    if not isinstance(corrected_at, str) or not valid_import_timestamp(corrected_at):
+        raise InvalidImport(f"line {line_number}: invalid corrected_at")
+    text_values = (
+        record["id"],
+        record["target_id"],
+        replacement_id or "",
+        record["reason"],
+    )
+    try:
+        for value in text_values:
+            value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidImport(f"line {line_number}: text must be valid UTF-8") from None
+    return correction_values(record)
+
+
+def parse_import_record(
+    line: str, line_number: int
+) -> tuple[str, dict[str, Any]]:
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, UnicodeError, RecursionError):
+        raise InvalidImport(f"line {line_number}: invalid JSON") from None
+    if not isinstance(record, dict):
+        raise InvalidImport(f"line {line_number}: expected record object")
+    record_type = record.get("type")
+    if record_type == "event":
+        return record_type, parse_event_import_record(record, line_number)
+    if record_type == "correction":
+        return record_type, parse_correction_import_record(record, line_number)
+    raise InvalidImport(f"line {line_number}: unsupported record type")
+
+
+def import_event_record(
+    database: sqlite3.Connection, event: dict[str, Any], line_number: int
+) -> None:
+    existing = database.execute(
+        """
+        SELECT id, name, occurred_at, occurred_on, note
+        FROM events
+        WHERE id = ?
+        """,
+        (event["id"],),
+    ).fetchone()
+    if existing is not None:
+        if event_values(existing) != event:
+            raise InvalidImport(
+                f"line {line_number}: ID conflicts with existing event"
+            )
+        return
+    database.execute(
+        """
+        INSERT INTO events (id, name, occurred_at, occurred_on, note)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            event["id"],
+            event["name"],
+            event["occurred_at"],
+            event["occurred_on"],
+            event["note"],
+        ),
+    )
+
+
+def import_correction_record(
+    database: sqlite3.Connection,
+    correction: dict[str, Any],
+    line_number: int,
+) -> None:
+    existing = database.execute(
+        """
+        SELECT id, kind, target_id, replacement_id, reason, corrected_at
+        FROM corrections
+        WHERE id = ?
+        """,
+        (correction["id"],),
+    ).fetchone()
+    if existing is not None:
+        if correction_values(existing) != correction:
+            raise InvalidImport(
+                f"line {line_number}: ID conflicts with existing correction"
+            )
+        return
+    linked_ids = (correction["target_id"], correction["replacement_id"])
+    for linked_id in linked_ids:
+        if linked_id is None:
+            continue
+        linked_event = database.execute(
+            "SELECT 1 FROM events WHERE id = ?", (linked_id,)
+        ).fetchone()
+        if linked_event is None:
+            raise InvalidImport(
+                f"line {line_number}: correction references missing event"
+            )
+    corrected_target = database.execute(
+        "SELECT 1 FROM corrections WHERE target_id = ?",
+        (correction["target_id"],),
+    ).fetchone()
+    if corrected_target is not None:
+        raise InvalidImport(f"line {line_number}: event already has a correction")
+    replacement_id = correction["replacement_id"]
+    if replacement_id is not None:
+        used_replacement = database.execute(
+            "SELECT 1 FROM corrections WHERE replacement_id = ?",
+            (replacement_id,),
+        ).fetchone()
+        if used_replacement is not None:
+            raise InvalidImport(
+                f"line {line_number}: replacement event is already linked"
+            )
+    try:
+        database.execute(
+            """
+            INSERT INTO corrections
+                (id, kind, target_id, replacement_id, reason, corrected_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                correction["id"],
+                correction["kind"],
+                correction["target_id"],
+                replacement_id,
+                correction["reason"],
+                correction["corrected_at"],
+            ),
+        )
+    except sqlite3.IntegrityError:
+        raise InvalidImport(f"line {line_number}: invalid correction") from None
+
+
 def import_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     line_number = 0
     database.execute("BEGIN IMMEDIATE")
     try:
         for line_number, line in enumerate(sys.stdin, 1):
-            event = parse_import_record(line, line_number)
-            existing = database.execute(
-                """
-                SELECT id, name, occurred_at, occurred_on, note
-                FROM events
-                WHERE id = ?
-                """,
-                (event["id"],),
-            ).fetchone()
-            if existing is not None:
-                if event_values(existing) != event:
-                    raise InvalidImport(
-                        f"line {line_number}: ID conflicts with existing event"
-                    )
-                continue
-            database.execute(
-                """
-                INSERT INTO events (id, name, occurred_at, occurred_on, note)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    event["id"],
-                    event["name"],
-                    event["occurred_at"],
-                    event["occurred_on"],
-                    event["note"],
-                ),
-            )
+            record_type, record = parse_import_record(line, line_number)
+            if record_type == "event":
+                import_event_record(database, record, line_number)
+            else:
+                import_correction_record(database, record, line_number)
         database.commit()
     except UnicodeError:
         database.rollback()
@@ -1018,6 +1175,7 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
             permissions = "not-applicable"
 
         events: int | None = 0
+        corrections: int | None = 0
         try:
             rows = database.execute(
                 """
@@ -1026,12 +1184,32 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
                 ORDER BY rowid
                 """
             )
-            for events, row in enumerate(rows, 1):
+            for row in rows:
+                events += 1
                 encoded = json.dumps(interchange_record(row), ensure_ascii=False)
                 parse_import_record(encoded, events)
+            correction_rows = database.execute(
+                """
+                SELECT id, kind, target_id, replacement_id, reason, corrected_at
+                FROM corrections
+                ORDER BY rowid
+                """
+            )
+            for row in correction_rows:
+                corrections += 1
+                encoded = json.dumps(
+                    correction_interchange_record(row), ensure_ascii=False
+                )
+                parse_import_record(encoded, events + corrections)
+            foreign_key_problem = database.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchone()
+            if foreign_key_problem is not None:
+                raise sqlite3.DatabaseError("foreign key check failed")
             parseability = "ok"
         except (InvalidImport, sqlite3.Error, TypeError, UnicodeError) as error:
             events = None
+            corrections = None
             parseability = str(error)
 
         checks = (schema, integrity, permissions, parseability)
@@ -1050,6 +1228,7 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
             "permissions": permissions,
             "parseability": parseability,
             "events": events,
+            "corrections": corrections,
             "status": status,
         }
         if args.jsonl:
@@ -1061,6 +1240,10 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
             print(f"Permissions: {permissions}")
             print(f"Parseability: {parseability}")
             print(f"Events: {events if events is not None else '-'}")
+            print(
+                "Corrections: "
+                f"{corrections if corrections is not None else '-'}"
+            )
             print(f"Status: {status}")
         return 0 if status == "ok" else 3
     finally:
