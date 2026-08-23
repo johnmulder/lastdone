@@ -59,7 +59,7 @@ class CliContractTests(unittest.TestCase):
     def test_help_and_version(self) -> None:
         version = self.run_cli("--version")
         self.assertEqual(0, version.returncode)
-        self.assertEqual("lastdone 0.6.0\n", version.stdout)
+        self.assertEqual("lastdone 0.7.0\n", version.stdout)
         self.assertEqual("", version.stderr)
 
         help_result = self.run_cli("--help")
@@ -71,6 +71,8 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("doctor", help_result.stdout)
         self.assertIn("void", help_result.stdout)
         self.assertIn("replace", help_result.stdout)
+        self.assertIn("set", help_result.stdout)
+        self.assertIn("due", help_result.stdout)
         self.assertEqual("", help_result.stderr)
 
     def test_invalid_input_uses_exit_two_and_stderr(self) -> None:
@@ -92,6 +94,17 @@ class CliContractTests(unittest.TestCase):
             ("void", "event", "--reason", ""),
             ("replace", "event"),
             ("replace", "event", "--reason", "reason", "--note", "line\nbreak"),
+            ("set", "name"),
+            ("set", "name", "--every", "0d"),
+            ("set", "name", "--every", "01d"),
+            ("set", "name", "--every", "+1d"),
+            ("set", "name", "--every", "-1d"),
+            ("set", "name", "--every", "1D"),
+            ("set", "name", "--every", "1"),
+            ("set", "name", "--every", "1mo"),
+            ("set", "name", "--every", "١d"),
+            ("set", "name", "--every", "9223372036854775808d"),
+            ("due", "unexpected"),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_cli(*arguments)
@@ -1443,6 +1456,204 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(3, result.returncode)
         self.assertIn("database foreign key check failed", result.stderr)
 
+    def test_set_upserts_interval_and_lists_metadata_only_activity(self) -> None:
+        silent = self.run_cli("set", "filter", "--every", "90d")
+        self.assertEqual(0, silent.returncode, silent.stderr)
+        self.assertEqual("", silent.stdout)
+        self.assertEqual("", silent.stderr)
+        self.assertEqual("filter\n", self.run_cli("list").stdout)
+        listed = json.loads(self.run_cli("list", "--jsonl").stdout)
+        self.assertEqual(
+            {
+                "schema_version": 2,
+                "type": "activity",
+                "name": "filter",
+                "expected_interval_days": 90,
+            },
+            listed,
+        )
+
+        updated = self.run_cli(
+            "set", "filter", "--every", "30d", "--jsonl"
+        )
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        self.assertEqual(30, json.loads(updated.stdout)["expected_interval_days"])
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            self.assertEqual(
+                [("filter", 30)],
+                database.execute(
+                    "SELECT name, expected_interval_days FROM activities"
+                ).fetchall(),
+            )
+
+    def test_due_reports_all_states_and_filters_only_overdue(self) -> None:
+        intervals = {
+            "due-today": 2,
+            "future": 2,
+            "never": 7,
+            "not-due": 3,
+            "overdue": 2,
+        }
+        for name, interval in intervals.items():
+            result = self.run_cli("set", name, "--every", f"{interval}d")
+            self.assertEqual(0, result.returncode, result.stderr)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.executemany(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES (?, ?, NULL, ?, NULL)
+                """,
+                (
+                    ("due-id", "due-today", "2026-08-20"),
+                    ("future-id", "future", "2026-08-23"),
+                    ("not-due-id", "not-due", "2026-08-20"),
+                    ("overdue-id", "overdue", "2026-08-19"),
+                ),
+            )
+            database.commit()
+
+        now = datetime(2026, 8, 22, 12, tzinfo=timezone.utc)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = RUN(("due", "--jsonl"), now=now, path=database_path)
+        self.assertEqual(0, status)
+        records = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(list(intervals), [record["name"] for record in records])
+        self.assertEqual(
+            {
+                "due-today": "due-today",
+                "future": "future-dated",
+                "never": "never-recorded",
+                "not-due": "not-due",
+                "overdue": "overdue",
+            },
+            {record["name"]: record["state"] for record in records},
+        )
+        self.assertEqual(
+            {
+                "due-today": "2026-08-22",
+                "future": "2026-08-25",
+                "never": None,
+                "not-due": "2026-08-23",
+                "overdue": "2026-08-21",
+            },
+            {record["name"]: record["due_on"] for record in records},
+        )
+        self.assertIsNone(records[2]["last"])
+
+        human = io.StringIO()
+        with redirect_stdout(human):
+            status = RUN(("due",), now=now, path=database_path)
+        self.assertEqual(0, status)
+        self.assertIn(
+            "never  -  7d  -  NEVER-RECORDED\n", human.getvalue()
+        )
+        overdue = io.StringIO()
+        with redirect_stdout(overdue):
+            status = RUN(
+                ("due", "--overdue", "--jsonl"),
+                now=now,
+                path=database_path,
+            )
+        self.assertEqual(0, status)
+        filtered = [json.loads(line) for line in overdue.getvalue().splitlines()]
+        self.assertEqual(["overdue"], [record["name"] for record in filtered])
+
+    def test_due_uses_calendar_dates_timezone_and_effective_history(self) -> None:
+        self.assertEqual(
+            0, self.run_cli("set", "leap", "--every", "365d").returncode
+        )
+        self.assertEqual(
+            0, self.run_cli("add", "leap", "--date", "2024-02-29").returncode
+        )
+        self.assertEqual(
+            0, self.run_cli("set", "dst", "--every", "1d").returncode
+        )
+        original = self.add_json("corrected", "--date", "2026-01-01")
+        self.assertEqual(
+            0, self.run_cli("set", "corrected", "--every", "1d").returncode
+        )
+        replaced = self.run_cli(
+            "replace",
+            str(original["id"]),
+            "--reason",
+            "wrong date",
+            "--date",
+            "2026-03-08",
+        )
+        self.assertEqual(0, replaced.returncode, replaced.stderr)
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES ('dst-id', 'dst', '2026-03-08T07:30:00.000000Z',
+                        NULL, NULL)
+                """
+            )
+            database.commit()
+
+        previous_timezone = os.environ.get("TZ")
+        os.environ["TZ"] = "America/Denver"
+        time.tzset()
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                status = RUN(
+                    ("due", "--jsonl"),
+                    now=datetime(
+                        2026,
+                        3,
+                        9,
+                        12,
+                        tzinfo=timezone(-timedelta(hours=6)),
+                    ),
+                    path=database_path,
+                )
+        finally:
+            if previous_timezone is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous_timezone
+            time.tzset()
+        self.assertEqual(0, status)
+        records = {
+            record["name"]: record
+            for record in map(json.loads, output.getvalue().splitlines())
+        }
+        self.assertEqual("2025-02-28", records["leap"]["due_on"])
+        self.assertEqual("2026-03-09", records["dst"]["due_on"])
+        self.assertEqual("due-today", records["dst"]["state"])
+        self.assertEqual("2026-03-09", records["corrected"]["due_on"])
+        self.assertEqual("due-today", records["corrected"]["state"])
+
+    def test_due_handles_interval_beyond_calendar_range(self) -> None:
+        self.assertEqual(
+            0, self.run_cli("set", "maximum", "--every", "1d").returncode
+        )
+        database_path = self.data_home / "last" / "last.db"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                """
+                INSERT INTO events (id, name, occurred_at, occurred_on, note)
+                VALUES ('maximum-id', 'maximum', NULL, '9999-12-31', NULL)
+                """
+            )
+            database.commit()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = RUN(
+                ("due", "--jsonl"),
+                now=datetime(9999, 12, 31, tzinfo=timezone.utc),
+                path=database_path,
+            )
+        self.assertEqual(0, status)
+        record = json.loads(output.getvalue())
+        self.assertEqual("not-due", record["state"])
+        self.assertIsNone(record["due_on"])
+
     def test_list_is_distinct_and_ordered_by_utf8_bytes(self) -> None:
         names = ["zeta", "alpha", "Alpha", "éclair", "alpha"]
         for name in names:
@@ -1460,6 +1671,7 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(
             all(
                 record["schema_version"] == 2 and record["type"] == "activity"
+                and record["expected_interval_days"] is None
                 for record in records
             )
         )

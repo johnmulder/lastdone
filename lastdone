@@ -16,9 +16,10 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 SCHEMA_VERSION = 3
 BUSY_TIMEOUT_SECONDS = 5.0
+SQLITE_MAX_INTEGER = 2**63 - 1
 
 
 class ActivityNotFound(Exception):
@@ -96,6 +97,22 @@ def calendar_date(value: str, *, today: date) -> str:
     if parsed > today:
         raise argparse.ArgumentTypeError("DATE must not be in the future")
     return value
+
+
+def day_interval(value: str) -> int:
+    digits = value[:-1]
+    if (
+        not value.endswith("d")
+        or not digits
+        or not digits.isascii()
+        or not digits.isdigit()
+        or digits.startswith("0")
+    ):
+        raise argparse.ArgumentTypeError("INTERVAL must be a positive whole-day value")
+    interval = int(digits)
+    if interval > SQLITE_MAX_INTEGER:
+        raise argparse.ArgumentTypeError("INTERVAL is too large")
+    return interval
 
 
 def parse_args(
@@ -185,6 +202,25 @@ def parse_args(
     )
     replace.add_argument("--jsonl", action="store_true", help="emit JSONL")
     replace.set_defaults(handler=replace_event)
+
+    set_command = commands.add_parser("set", help="set an expected interval")
+    set_command.add_argument("name", type=activity_name, metavar="NAME")
+    set_command.add_argument(
+        "--every",
+        type=day_interval,
+        dest="expected_interval_days",
+        required=True,
+        metavar="INTERVAL",
+    )
+    set_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    set_command.set_defaults(handler=set_interval)
+
+    due_command = commands.add_parser("due", help="show configured due states")
+    due_command.add_argument(
+        "--overdue", action="store_true", help="show only overdue activities"
+    )
+    due_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
+    due_command.set_defaults(handler=show_due)
 
     list_command = commands.add_parser("list", help="list known activities")
     list_command.add_argument("--jsonl", action="store_true", help="emit JSONL")
@@ -577,6 +613,17 @@ def correction_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {"schema_version": 2, "type": "correction", **correction_values(row)}
 
 
+def activity_values(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": row["name"],
+        "expected_interval_days": row["expected_interval_days"],
+    }
+
+
+def activity_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {"schema_version": 2, "type": "activity", **activity_values(row)}
+
+
 def interchange_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {"record_version": 2, "type": "event", **event_values(row)}
 
@@ -886,21 +933,112 @@ def show_audit_history(
 def list_activities(database: sqlite3.Connection, args: argparse.Namespace) -> int:
     rows = database.execute(
         """
-        SELECT DISTINCT name
-        FROM events
-        WHERE NOT EXISTS (
-            SELECT 1 FROM corrections WHERE target_id = events.id
+        WITH names AS (
+            SELECT name
+            FROM events
+            WHERE NOT EXISTS (
+                SELECT 1 FROM corrections WHERE target_id = events.id
+            )
+            UNION
+            SELECT name FROM activities
         )
-        ORDER BY name COLLATE BINARY
+        SELECT names.name, activities.expected_interval_days
+        FROM names
+        LEFT JOIN activities ON activities.name = names.name
+        ORDER BY names.name COLLATE BINARY
         """
     ).fetchall()
     for row in rows:
         if args.jsonl:
-            emit_json(
-                {"schema_version": 2, "type": "activity", "name": row["name"]}
-            )
+            emit_json(activity_record(row))
         else:
             print(row["name"])
+    return 0
+
+
+def set_interval(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    activity = {
+        "name": args.name,
+        "expected_interval_days": args.expected_interval_days,
+    }
+    database.execute(
+        """
+        INSERT INTO activities (name, expected_interval_days)
+        VALUES (?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            expected_interval_days = excluded.expected_interval_days
+        """,
+        tuple(activity.values()),
+    )
+    database.commit()
+    if args.jsonl:
+        emit_json(activity_record(activity))
+    return 0
+
+
+def due_record(
+    database: sqlite3.Connection,
+    activity: sqlite3.Row,
+    today: date,
+) -> dict[str, Any]:
+    rows = rows_for_activity(database, activity["name"])
+    if not rows:
+        last = None
+        due_on = None
+        state = "never-recorded"
+    else:
+        latest = rows[0]
+        last = occurrence_record(latest)
+        latest_date = occurrence_date(latest)
+        due_ordinal = latest_date.toordinal() + activity["expected_interval_days"]
+        due_on = (
+            date.fromordinal(due_ordinal).isoformat()
+            if due_ordinal <= date.max.toordinal()
+            else None
+        )
+        if latest_date > today:
+            state = "future-dated"
+        elif due_ordinal < today.toordinal():
+            state = "overdue"
+        elif due_ordinal == today.toordinal():
+            state = "due-today"
+        else:
+            state = "not-due"
+    return {
+        "schema_version": 2,
+        "type": "due",
+        **activity_values(activity),
+        "last": last,
+        "due_on": due_on,
+        "state": state,
+    }
+
+
+def show_due(database: sqlite3.Connection, args: argparse.Namespace) -> int:
+    activities = database.execute(
+        """
+        SELECT name, expected_interval_days
+        FROM activities
+        ORDER BY name COLLATE BINARY
+        """
+    )
+    for activity in activities:
+        record = due_record(database, activity, args.now.date())
+        if args.overdue and record["state"] != "overdue":
+            continue
+        if args.jsonl:
+            emit_json(record)
+        else:
+            last_date = (
+                occurrence_date(record["last"]).isoformat()
+                if record["last"] is not None
+                else "-"
+            )
+            print(
+                f"{record['name']}  {last_date}  "
+                f"{record['expected_interval_days']}d  "
+                f"{record['due_on'] or '-'}  {record['state'].upper()}"
+            )
     return 0
 
 
