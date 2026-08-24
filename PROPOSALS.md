@@ -7,57 +7,6 @@ contracts, not new end-user features.
 
 ## Active proposals
 
-### P0 / Do now: Contain every malformed JSONL record
-
-**Gap**
-
-The shared `import` and `batch` parser translates ordinary JSON syntax errors,
-Unicode failures, and excessive nesting into stable exit-2 diagnostics. Python's
-JSON decoder can also raise a plain `ValueError`, notably when an integer literal
-exceeds Python's integer-string safety limit. That exception currently escapes
-as a traceback and exit 1.
-
-**Why it matters**
-
-JSONL is an untrusted input boundary. Malformed input must not reveal an
-implementation traceback or bypass the documented invalid-input behavior. Both
-commands also promise all-or-nothing application, so a bad later line must not
-leave earlier records committed.
-
-**Approach**
-
-At the narrow call site around `json.loads`, translate every expected
-decoder-originated malformed-input exception, including its plain `ValueError`,
-into the existing line-numbered `InvalidImport` path. Let `batch` continue to
-translate that error to `InvalidBatch`. Do not broaden the catch around field
-validation, database work, or the command as a whole.
-
-**Implementation considerations**
-
-- Preserve exit 2, empty stdout, and the existing
-  `lastdone: import error: line N:` or `lastdone: batch error: line N:`
-  diagnostic shape.
-- Do not disable Python's integer-string safety limit merely to accept a number
-  that no interchange field requires.
-- Preserve the current single transaction for the complete input stream and
-  roll it back on any rejected record.
-- Keep diagnostics bounded and never echo the rejected record, a note, or other
-  potentially sensitive input.
-- Do not use `except Exception` for containment. Programming errors outside the
-  decoder must remain visible during development.
-
-**Tests / acceptance criteria**
-
-- An oversized integer literal sent to either `import` or `batch` returns 2,
-  writes nothing to stdout, emits the appropriate line-numbered invalid-JSON
-  diagnostic, and never prints a traceback.
-- Excessively nested JSON receives the same contained behavior through the
-  shared parser.
-- For both commands, place malformed JSON after a valid record and verify that
-  the valid record is rolled back.
-- Diagnostics do not include the oversized literal or any preceding private
-  record content.
-
 ### P1 / Do soon: Make partial activity metadata updates atomic
 
 **Gap**
@@ -270,13 +219,11 @@ contracts require it.
 
 ## Ordered implementation sequence
 
-1. Contain decoder-originated malformed JSON for both `import` and `batch`, with
-   rollback and no-traceback regressions.
-2. Enclose `set`'s metadata read-modify-write in one immediate transaction and
+1. Enclose `set`'s metadata read-modify-write in one immediate transaction and
    add the smallest useful lost-update regression.
-3. Enclose `export` and `doctor` reads in coherent SQLite snapshots; keep the
+2. Enclose `export` and `doctor` reads in coherent SQLite snapshots; keep the
    concurrency test simple and preserve export round-trip coverage.
-4. Audit and ratify the existing personal-OS convention pack and fixtures,
+3. Audit and ratify the existing personal-OS convention pack and fixtures,
    changing only demonstrated contract drift.
 
 Do no migration-backup work until the next relevant schema migration, and make
