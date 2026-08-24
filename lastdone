@@ -1644,7 +1644,7 @@ def parse_import_record(
 ) -> tuple[str, dict[str, Any]]:
     try:
         record = json.loads(line)
-    except (json.JSONDecodeError, UnicodeError, RecursionError):
+    except (ValueError, UnicodeError, RecursionError):
         raise InvalidImport(f"line {line_number}: invalid JSON") from None
     if not isinstance(record, dict):
         raise InvalidImport(f"line {line_number}: expected record object")

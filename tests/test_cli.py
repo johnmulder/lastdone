@@ -11,6 +11,7 @@ import runpy
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -801,6 +802,53 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertNotIn(private_note, invalid_json.stderr)
         self.assertEqual("", self.run_cli(*arguments, "export", "--jsonl").stdout)
+
+    def test_decoder_failures_are_contained_and_atomic(self) -> None:
+        private_note = "private-note-4831"
+        valid_event = {
+            "record_version": 5,
+            "type": "event",
+            "id": "rolled-back-event",
+            "name": "private-log",
+            "occurred_at": None,
+            "occurred_on": "2024-01-01",
+            "note": private_note,
+            "reading_value": None,
+            "reading_unit": None,
+        }
+        integer_limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+        malformed = (
+            (
+                "oversized-integer",
+                "9" * max(10_000, integer_limit + 1),
+                "invalid JSON" if integer_limit else "expected record object",
+            ),
+            ("deep-nesting", "[" * 10_000 + "]" * 10_000, "invalid JSON"),
+        )
+        for command in ("import", "batch"):
+            for case, bad_line, detail in malformed:
+                with self.subTest(command=command, case=case):
+                    database_path = self.data_home / f"{command}-{case}" / "last.db"
+                    arguments = ("--db", str(database_path))
+                    stream = f"{json.dumps(valid_event)}\n{bad_line}\n"
+                    result = self.run_cli(
+                        *arguments,
+                        command,
+                        "--jsonl",
+                        input_text=stream,
+                    )
+                    self.assertEqual(2, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertEqual(
+                        f"lastdone: {command} error: line 2: {detail}\n",
+                        result.stderr,
+                    )
+                    self.assertLess(len(result.stderr), 200)
+                    self.assertNotIn(private_note, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    exported = self.run_cli(*arguments, "export", "--jsonl")
+                    self.assertEqual(0, exported.returncode, exported.stderr)
+                    self.assertEqual("", exported.stdout)
 
     def test_import_requires_events_before_valid_corrections(self) -> None:
         event = {
