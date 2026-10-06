@@ -1290,38 +1290,33 @@ def set_interval(database: sqlite3.Connection, args: argparse.Namespace) -> int:
         raise InvalidActivityUpdate(
             "set requires at least one of --every or --display-name"
         )
-    existing = database.execute(
-        """
-        SELECT name, expected_interval_days, display_name
-        FROM activities
-        WHERE name = ?
-        """,
-        (args.name,),
-    ).fetchone()
-    activity = {
-        "name": args.name,
-        "expected_interval_days": (
-            args.expected_interval_days
-            if hasattr(args, "expected_interval_days")
-            else existing["expected_interval_days"] if existing else None
-        ),
-        "display_name": (
-            args.display_name
-            if hasattr(args, "display_name")
-            else existing["display_name"] if existing else None
-        ),
-    }
-    database.execute(
-        """
-        INSERT INTO activities (name, expected_interval_days, display_name)
-        VALUES (?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            expected_interval_days = excluded.expected_interval_days,
-            display_name = excluded.display_name
-        """,
-        tuple(activity.values()),
-    )
-    database.commit()
+    with database:
+        database.execute(
+            """
+            INSERT INTO activities (name, expected_interval_days, display_name)
+            VALUES (?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                expected_interval_days = CASE WHEN ?
+                    THEN excluded.expected_interval_days
+                    ELSE activities.expected_interval_days END,
+                display_name = CASE WHEN ?
+                    THEN excluded.display_name ELSE activities.display_name END
+            """,
+            (
+                args.name,
+                getattr(args, "expected_interval_days", None),
+                getattr(args, "display_name", None),
+                hasattr(args, "expected_interval_days"),
+                hasattr(args, "display_name"),
+            ),
+        )
+        activity = database.execute(
+            """
+            SELECT name, expected_interval_days, display_name
+            FROM activities WHERE name = ?
+            """,
+            (args.name,),
+        ).fetchone()
     if args.jsonl:
         emit_json(activity_record(activity))
     return 0

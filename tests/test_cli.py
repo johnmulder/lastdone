@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import io
@@ -839,9 +840,13 @@ class CliContractTests(unittest.TestCase):
                     )
                     self.assertEqual(2, result.returncode)
                     self.assertEqual("", result.stdout)
-                    self.assertEqual(
-                        f"lastdone: {command} error: line 2: {detail}\n",
+                    details = {detail}
+                    if case == "deep-nesting":
+                        # Decoders that accept the nesting still reject its array shape.
+                        details.add("expected record object")
+                    self.assertIn(
                         result.stderr,
+                        {f"lastdone: {command} error: line 2: {item}\n" for item in details},
                     )
                     self.assertLess(len(result.stderr), 200)
                     self.assertNotIn(private_note, result.stderr)
@@ -2414,6 +2419,58 @@ class CliContractTests(unittest.TestCase):
         self.assertIn(
             f"coffee-clean  {normalized}  ", self.run_cli("due").stdout
         )
+
+    def test_partial_metadata_updates_preserve_another_connections_changes(self) -> None:
+        module = RUN.__globals__
+        path = self.data_home / "concurrent.db"
+        first = module["connect_database"](path)
+        second = sqlite3.connect(path, timeout=0)
+        second.row_factory = sqlite3.Row
+        update = module["set_interval"]
+        update(first, argparse.Namespace(name="filter", expected_interval_days=30,
+                                        display_name="Old", jsonl=False))
+        rename = argparse.Namespace(name="filter", display_name="New", jsonl=False)
+        deferred = []
+
+        class Cursor:
+            def __init__(self, cursor):
+                self.cursor = cursor
+
+            def fetchone(self):
+                row = self.cursor.fetchone()
+                try:
+                    update(second, rename)
+                except sqlite3.OperationalError as error:
+                    if "locked" not in str(error):
+                        raise
+                    deferred.append(rename)
+                return row
+
+        class Connection:
+            def __enter__(self):
+                first.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return first.__exit__(*args)
+
+            def execute(self, query, parameters):
+                cursor = first.execute(query, parameters)
+                return Cursor(cursor) if "SELECT name," in query else cursor
+
+            def commit(self):
+                first.commit()
+
+        try:
+            update(Connection(), argparse.Namespace(name="filter", expected_interval_days=90,
+                                                    jsonl=False))
+            for args in deferred:
+                update(second, args)
+            row = first.execute("SELECT expected_interval_days, display_name FROM activities").fetchone()
+            self.assertEqual((90, "New"), tuple(row))
+        finally:
+            first.close()
+            second.close()
 
     def test_replacement_human_text_is_normalized_to_nfc(self) -> None:
         original = self.add_json("normalize", "--date", "2026-08-20")
