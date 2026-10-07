@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 
@@ -529,6 +530,90 @@ class CliContractTests(unittest.TestCase):
             exported.stdout,
             self.run_cli(*target_arguments, "export", "--jsonl").stdout,
         )
+
+    def test_export_keeps_one_snapshot_during_concurrent_replacement(self) -> None:
+        path = self.data_home / "export-snapshot.db"
+        arguments = ("--db", str(path))
+        added = self.run_cli(*arguments, "add", "filter", "--jsonl")
+        self.assertEqual(0, added.returncode, added.stderr)
+        event = json.loads(added.stdout)
+        before = self.run_cli(*arguments, "export", "--jsonl").stdout
+        with closing(sqlite3.connect(path)) as setup:
+            setup.execute("PRAGMA journal_mode=WAL")
+        test = self
+
+        class InterleavedConnection(sqlite3.Connection):
+            replaced = False
+
+            def execute(self, query, *parameters):
+                if "FROM corrections" in query and not self.replaced:
+                    result = test.run_cli(
+                        *arguments, "replace", event["id"],
+                        "--reason", "corrected note", "--note", "replacement",
+                    )
+                    test.assertEqual(0, result.returncode, result.stderr)
+                    self.replaced = True
+                return super().execute(query, *parameters)
+
+        with closing(sqlite3.connect(path, factory=InterleavedConnection)) as database:
+            database.row_factory = sqlite3.Row
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = RUN.__globals__["export_events"](
+                    database, argparse.Namespace()
+                )
+            self.assertEqual(0, code)
+            self.assertTrue(database.replaced)
+            self.assertFalse(database.in_transaction)
+        self.assertEqual(before, output.getvalue())
+        restored = ("--db", str(self.data_home / "restored.db"))
+        imported = self.run_cli(
+            *restored, "import", "--jsonl", input_text=output.getvalue()
+        )
+        self.assertEqual(0, imported.returncode, imported.stderr)
+        self.assertEqual(
+            output.getvalue(),
+            self.run_cli(*restored, "export", "--jsonl").stdout,
+        )
+        self.assertNotEqual(before, self.run_cli(*arguments, "export", "--jsonl").stdout)
+
+    def test_doctor_keeps_counts_in_its_initial_read_snapshot(self) -> None:
+        path = self.data_home / "doctor-snapshot.db"
+        arguments = ("--db", str(path))
+        added = self.run_cli(*arguments, "add", "filter")
+        self.assertEqual(0, added.returncode, added.stderr)
+        with closing(sqlite3.connect(path)) as setup:
+            setup.execute("PRAGMA journal_mode=WAL")
+        test = self
+
+        class InterleavedConnection(sqlite3.Connection):
+            added = False
+
+            def execute(self, query, *parameters):
+                if "FROM events" in query and not self.added:
+                    result = test.run_cli(*arguments, "add", "other")
+                    test.assertEqual(0, result.returncode, result.stderr)
+                    self.added = True
+                return super().execute(query, *parameters)
+
+        def connect_read_only(selected):
+            resolved = selected.resolve()
+            database = sqlite3.connect(
+                f"{resolved.as_uri()}?mode=ro", uri=True,
+                factory=InterleavedConnection,
+            )
+            database.row_factory = sqlite3.Row
+            return resolved, database
+
+        output = io.StringIO()
+        with patch.dict(RUN.__globals__, {"connect_read_only": connect_read_only}):
+            with redirect_stdout(output):
+                code = RUN(["doctor", "--jsonl"], path=path)
+        self.assertEqual(0, code)
+        self.assertEqual(1, json.loads(output.getvalue())["events"])
+        after = self.run_cli(*arguments, "doctor", "--jsonl")
+        self.assertEqual(0, after.returncode, after.stderr)
+        self.assertEqual(2, json.loads(after.stdout)["events"])
 
     def test_personal_os_convention_fixtures_match_cli(self) -> None:
         fixture_text: dict[str, str] = {}

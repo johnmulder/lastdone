@@ -1391,34 +1391,36 @@ def show_due(database: sqlite3.Connection, args: argparse.Namespace) -> int:
 
 
 def export_events(database: sqlite3.Connection, args: argparse.Namespace) -> int:
-    rows = database.execute(
-        """
-        SELECT id, name, occurred_at, occurred_on, note,
-               reading_value, reading_unit
-        FROM events
-        ORDER BY rowid
-        """
-    )
-    for row in rows:
-        emit_json(interchange_record(row))
-    corrections = database.execute(
-        """
-        SELECT id, kind, target_id, replacement_id, reason, corrected_at
-        FROM corrections
-        ORDER BY rowid
-        """
-    )
-    for correction in corrections:
-        emit_json(correction_interchange_record(correction))
-    activities = database.execute(
-        """
-        SELECT name, expected_interval_days, display_name
-        FROM activities
-        ORDER BY name COLLATE BINARY
-        """
-    )
-    for activity in activities:
-        emit_json(activity_interchange_record(activity))
+    with database:
+        database.execute("BEGIN")
+        rows = database.execute(
+            """
+            SELECT id, name, occurred_at, occurred_on, note,
+                   reading_value, reading_unit
+            FROM events
+            ORDER BY rowid
+            """
+        )
+        for row in rows:
+            emit_json(interchange_record(row))
+        corrections = database.execute(
+            """
+            SELECT id, kind, target_id, replacement_id, reason, corrected_at
+            FROM corrections
+            ORDER BY rowid
+            """
+        )
+        for correction in corrections:
+            emit_json(correction_interchange_record(correction))
+        activities = database.execute(
+            """
+            SELECT name, expected_interval_days, display_name
+            FROM activities
+            ORDER BY name COLLATE BINARY
+            """
+        )
+        for activity in activities:
+            emit_json(activity_interchange_record(activity))
     return 0
 
 
@@ -1899,6 +1901,7 @@ def stored_convention_issues(database: sqlite3.Connection) -> list[str]:
 def doctor_database(path: Path, args: argparse.Namespace) -> int:
     resolved, database = connect_read_only(path)
     try:
+        database.execute("BEGIN")
         version: int | None = None
         try:
             version = database_schema_version(database)
@@ -1992,6 +1995,7 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
             convention_issues = None
             conventions = str(error)
 
+        database.commit()
         checks = (schema, integrity, permissions, parseability, conventions)
         status = (
             "ok"

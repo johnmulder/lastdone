@@ -376,6 +376,9 @@ then every correction in correction order, then activity metadata by name. It
 streams directly from SQLite and includes every durable field. An empty database
 emits no output successfully.
 
+All export queries share one read transaction, so concurrent corrections cannot
+produce a stream containing a correction without its replacement event.
+
 ### `import`
 
 `import --jsonl` reads interchange records from standard input and is
@@ -398,6 +401,8 @@ activity metadata parseability, key/text convention deviations, all three
 counts, and overall status. Invalid stored keys and non-NFC text are reported
 without mutation. Human output uses labeled lines; `--jsonl` emits the doctor
 record above.
+
+Database checks and counts share one read transaction and describe one snapshot.
 
 A healthy report returns 0. A completed report with problems returns 3. A
 missing or inaccessible database is a storage error, returns 3, emits no report,
