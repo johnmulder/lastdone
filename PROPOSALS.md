@@ -7,93 +7,6 @@ contracts, not new end-user features.
 
 ## Active proposals
 
-### P1 / Do soon: Make partial activity metadata updates atomic
-
-**Gap**
-
-`set` reads the existing activity row to preserve omitted fields, then upserts a
-complete row. No transaction encloses that read-modify-write sequence. Concurrent
-`set --every` and `set --display-name` commands can therefore read the same stale
-row and silently overwrite each other's independent change.
-
-**Why it matters**
-
-This is a lost-update correctness bug, not a throughput optimization. A command
-that promises to preserve an omitted field must do so even when another writer
-updates that field concurrently. The reference CLI should establish that partial
-metadata updates do not silently discard committed data.
-
-**Approach**
-
-Begin one `BEGIN IMMEDIATE` SQLite transaction before reading the activity row,
-then merge, upsert, and commit inside that transaction. This matches the existing
-write paths and is the smallest fix.
-
-**Implementation considerations**
-
-- Reuse SQLite's existing transaction support, five-second busy timeout, and
-  actionable storage diagnostic. Do not add retries or a transaction framework.
-- Roll back on failure and emit JSONL only after the commit succeeds.
-- Preserve the current idempotent upsert, omitted-field semantics, and record
-  shape.
-- This requires no ORM, schema migration, repository layer, or new abstraction.
-
-**Tests / acceptance criteria**
-
-- A deterministic two-writer regression updates the interval and display name
-  independently under contention and verifies that the final row contains both
-  committed values.
-- Existing single-command behavior, including silent human success and JSONL
-  output after commit, remains unchanged.
-- A lock timeout still returns the documented storage error without a traceback
-  or partial update.
-
-### P1 / Do soon: Give export and doctor one coherent read snapshot
-
-**Gap**
-
-`export` reads events, corrections, and activities with separate queries and no
-explicit read transaction. A concurrent replacement between phases can produce
-a correction whose replacement event is absent, making a successful export
-impossible to import. `doctor` similarly performs structure, integrity,
-parseability, convention, and count queries without fixing one database state.
-
-**Why it matters**
-
-A successful export must represent one coherent database state and be accepted
-by `import`. That is a backup and portability guarantee, not merely prettier
-reporting. A completed doctor report should likewise describe one state rather
-than combine checks and counts from different moments.
-
-**Approach**
-
-Open one ordinary SQLite read transaction before the first database read and
-hold it through the final export query or doctor check. Continue streaming rows;
-there is no need to load the database into memory. Commit the read transaction
-on success and roll it back or close it on failure.
-
-**Implementation considerations**
-
-- A deferred read transaction is sufficient. Do not acquire a write lock,
-  change journal mode, or introduce a snapshot abstraction.
-- Keep `doctor` read-only, non-creating, non-migrating, and non-repairing.
-- Preserve export ordering, import compatibility, the existing busy timeout,
-  and successful closed-pipe behavior.
-- Prefer a few local transaction statements in the two handlers over a generic
-  transaction helper.
-
-**Tests / acceptance criteria**
-
-- Every successful export can be imported into a fresh database and exported
-  again byte-for-byte, including events, corrections, and activity metadata.
-- If the existing test harness can interleave a replacement without production
-  hooks, add one deterministic regression at the query boundary and verify that
-  the export is wholly before or wholly after the replacement, never mixed.
-  Do not build barriers, a fault-injection framework, or elaborate concurrency
-  infrastructure solely for this race.
-- Doctor retains its documented output and exit behavior while its checks and
-  counts come from one snapshot.
-
 ### P2 / Establish the personal-OS composability contracts
 
 **Gap**
@@ -219,11 +132,7 @@ contracts require it.
 
 ## Ordered implementation sequence
 
-1. Enclose `set`'s metadata read-modify-write in one immediate transaction and
-   add the smallest useful lost-update regression.
-2. Enclose `export` and `doctor` reads in coherent SQLite snapshots; keep the
-   concurrency test simple and preserve export round-trip coverage.
-3. Audit and ratify the existing personal-OS convention pack and fixtures,
+1. Audit and ratify the existing personal-OS convention pack and fixtures,
    changing only demonstrated contract drift.
 
 Do no migration-backup work until the next relevant schema migration, and make
