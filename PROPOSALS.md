@@ -1,104 +1,13 @@
 # Proposals for `last`
 
-These proposals are ordered by when they are likely to pay off. They treat
-`lastdone` as both a small, mature Unix-style CLI and a likely reference for
-future personal-OS tools. The active work is about correctness and composable
-contracts, not new end-user features.
+This backlog records deferred decisions for the mature `lastdone` CLI and
+possible future personal-OS tools. No implementation proposal is currently active.
 
 ## Active proposals
 
-None. P2 was ratified on October 25, 2026; see the
-[audit record](conventions/v1/AUDIT.md). Deferred work below retains its triggers.
-
-## Completed proposals
-
-### P2 / Establish the personal-OS composability contracts
-
-**Status:** Ratified October 25, 2026. The audit fixed standard-stream encoding
-drift and clarified that tolerant command-result readers and lossless portable
-importers have different extension contracts. No storage/schema change or shared
-runtime was introduced.
-
-**Gap**
-
-The CLI contract, the versioned `conventions/v1` pack, implementation, and
-fixtures already encode most of the right Unix boundaries. Before `lastdone`
-becomes precedent for `where`, `capture`, `decision`, `now`, and other tools,
-those existing choices should be reviewed together and ratified as a small,
-explicit contract. Otherwise sibling commands may copy incidental behavior or
-couple directly to `lastdone`'s SQLite schema.
-
-**Why it matters**
-
-Shared edge conventions let small independent commands compose without a shared
-database, runtime, plugin system, or framework. Stabilizing these conventions
-while there is one mature implementation is cheaper than reconciling several
-incompatible tools later.
-
-**Approach**
-
-Audit the implementation against `CLI.md`, `README.md`, and
-`conventions/v1/SPEC.md`; resolve only demonstrated drift. Ratify the following
-conventions as the precedent future tools may copy:
-
-1. **Streams and diagnostics:** UTF-8 and LF; results on stdout; diagnostics on
-   stderr; success is silent on stderr; failure is silent on stdout except for a
-   completed diagnostic report such as unhealthy `doctor`; no terminal-control
-   sequences or tracebacks.
-2. **Exit status:** 0 for success, 1 for a requested resource or state not found,
-   2 for invalid arguments or input, and 3 for storage, configuration, or
-   integrity failure. Ordinary domain states belong in structured output. A
-   consumer-closed stdout pipe is a successful early exit.
-3. **JSONL and versions:** machine output is one compact object per line with a
-   `type` discriminator. Command results use `schema_version`; portable
-   interchange uses a separately evolving `record_version`; both are independent
-   of executable and SQLite schema versions. Command-result readers ignore added
-   fields; lossless portable importers enforce the documented versioned shapes.
-   Removal, rename, changed meaning, or an added field in a closed import shape
-   requires a version change.
-4. **Pipelines and interchange:** commands that accept streams read JSONL from
-   stdin and apply their documented transaction boundary; producers stream JSONL
-   to stdout. Export is lossless, coherent, re-importable, and idempotent on
-   replay. Rejected input is not echoed. SQLite is private storage, not an
-   integration API.
-5. **Time and identity:** exact instants are UTC RFC 3339 timestamps with six
-   fractional digits and `Z`; date-only facts remain `YYYY-MM-DD` and never gain
-   an invented timezone. `name` is a stable machine identifier with an explicit
-   command-owned grammar. `lastdone` uses exact lowercase ASCII activity keys and
-   never silently rewrites them; optional human text is separate and NFC
-   normalized.
-6. **Configuration and discovery:** explicit path option, then non-empty
-   command-specific environment variable, then `$XDG_DATA_HOME`, then
-   `~/.local/share`. Each tool owns its leaf directory and database. `--help`
-   succeeds on stdout, and `--version` emits exactly `PROGRAM MAJOR.MINOR.PATCH`
-   plus one LF.
-
-Future tools should reuse these boundaries while owning their domain records,
-identifier grammar, storage, and behavior. They should not require knowledge of
-`lastdone` tables or import its code.
-
-**Implementation considerations**
-
-- Treat the existing convention pack and byte fixtures as the starting point;
-  do not extract a library, shared runner, base command, or generalized framework.
-- Keep the public boundary at CLI streams and documented records. Downstream
-  tools must be able to consume `lastdone` without opening its SQLite database.
-- Change a convention only for a demonstrated inconsistency or ambiguity, not to
-  anticipate hypothetical sibling features.
-- This proposal adds no user-facing command, option, record type, or database
-  field.
-
-**Tests / acceptance criteria**
-
-- The implementation, CLI contract, convention pack, README examples, and
-  byte-for-byte fixtures agree on the conventions above.
-- Retain a black-box fixture test covering compact JSONL, Unicode, timestamp
-  precision, stdout/stderr separation, version output, and exit statuses 0-3.
-  Add only small cases for actual gaps found by the audit.
-- Export/import tests exercise the documented interchange rather than requiring
-  a downstream consumer to understand the SQLite schema.
-- The convention pack remains copyable documentation and fixtures, not a runtime
-  dependency shared by future tools.
+None. The composability contracts were ratified on October 25, 2026. Their
+maintained requirements are in the [convention pack](conventions/v1/SPEC.md),
+with verification in the [audit record](conventions/v1/AUDIT.md).
 
 ## Deferred / backlog
 
@@ -141,11 +50,3 @@ tags or taxonomy not required by current code, aliases, fuzzy matching, shared
 databases between personal-OS tools, plugin systems, and generalized framework
 extraction remain out of scope. Each adds a second problem before the core CLI
 contracts require it.
-
-## Ordered implementation sequence
-
-1. Complete: audit and ratify the existing personal-OS convention pack and
-   fixtures, changing only demonstrated contract drift. See the audit record.
-
-Do no migration-backup work until the next relevant schema migration, and make
-no command-namespace change in `lastdone` now.
