@@ -55,6 +55,8 @@ By default, data is stored at `~/.local/share/last/last.db`. Override this with
 - [CLI contract](CLI.md) — commands, output formats, validation, and exit codes
 - [Project idea](IDEA.md) — goals, motivation, and non-goals
 - [Personal-OS conventions](conventions/v1/SPEC.md) — shared stream conventions
+- [Convention ratification](conventions/v1/AUDIT.md) — audit evidence and the
+  boundary between extensible command results and lossless portable imports
 
 ## Tests
 

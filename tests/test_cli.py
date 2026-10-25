@@ -693,6 +693,46 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(fixture_text["version.stdout"], version.stdout)
         self.assertEqual("", version.stderr)
 
+    def test_utf8_streams_are_independent_of_python_io_encoding(self) -> None:
+        environment = {
+            **self.environment,
+            "PYTHONIOENCODING": "ascii",
+            "PYTHONUTF8": "0",
+            "LC_ALL": "C",
+        }
+        arguments = [sys.executable, str(CLI), "--db", str(self.data_home / "utf8.db")]
+        fixture = (CONVENTION_FIXTURES / "events.jsonl").read_bytes()
+        imported = subprocess.run(
+            [*arguments, "import", "--jsonl"],
+            input=fixture,
+            capture_output=True,
+            env=environment,
+            check=False,
+        )
+        self.assertEqual(0, imported.returncode, imported.stderr)
+        self.assertEqual(b"", imported.stdout)
+        self.assertEqual(b"", imported.stderr)
+        exported = subprocess.run(
+            [*arguments, "export", "--jsonl"],
+            capture_output=True,
+            env=environment,
+            check=False,
+        )
+        self.assertEqual(0, exported.returncode, exported.stderr)
+        self.assertEqual(fixture, exported.stdout)
+        self.assertEqual(b"", exported.stderr)
+        invalid = subprocess.run(
+            [*arguments, "import", "--jsonl"],
+            input=b"\xff\n",
+            capture_output=True,
+            env=environment,
+            check=False,
+        )
+        self.assertEqual(2, invalid.returncode)
+        self.assertEqual(b"", invalid.stdout)
+        self.assertNotIn(b"Traceback", invalid.stderr)
+        self.assertNotIn(b"\xff", invalid.stderr)
+
     def test_export_import_preserves_correction_chains(self) -> None:
         original = self.add_json("original", "--date", "2024-01-01")
         replaced = self.run_cli(

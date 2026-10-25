@@ -7,7 +7,17 @@ contracts, not new end-user features.
 
 ## Active proposals
 
+None. P2 was ratified on October 25, 2026; see the
+[audit record](conventions/v1/AUDIT.md). Deferred work below retains its triggers.
+
+## Completed proposals
+
 ### P2 / Establish the personal-OS composability contracts
+
+**Status:** Ratified October 25, 2026. The audit fixed standard-stream encoding
+drift and clarified that tolerant command-result readers and lossless portable
+importers have different extension contracts. No storage/schema change or shared
+runtime was introduced.
 
 **Gap**
 
@@ -42,8 +52,10 @@ conventions as the precedent future tools may copy:
 3. **JSONL and versions:** machine output is one compact object per line with a
    `type` discriminator. Command results use `schema_version`; portable
    interchange uses a separately evolving `record_version`; both are independent
-   of executable and SQLite schema versions. Consumers ignore added fields;
-   removal, rename, or changed meaning requires a version change.
+   of executable and SQLite schema versions. Command-result readers ignore added
+   fields; lossless portable importers enforce the documented versioned shapes.
+   Removal, rename, changed meaning, or an added field in a closed import shape
+   requires a version change.
 4. **Pipelines and interchange:** commands that accept streams read JSONL from
    stdin and apply their documented transaction boundary; producers stream JSONL
    to stdout. Export is lossless, coherent, re-importable, and idempotent on
@@ -132,8 +144,8 @@ contracts require it.
 
 ## Ordered implementation sequence
 
-1. Audit and ratify the existing personal-OS convention pack and fixtures,
-   changing only demonstrated contract drift.
+1. Complete: audit and ratify the existing personal-OS convention pack and
+   fixtures, changing only demonstrated contract drift. See the audit record.
 
 Do no migration-backup work until the next relevant schema migration, and make
 no command-namespace change in `lastdone` now.

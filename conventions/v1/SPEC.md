@@ -14,9 +14,15 @@ The `v1` directory names this convention version. It is independent of:
 
 Structured command results contain a positive integer `schema_version` and a
 string `type`. Portable interchange records use their owning command's positive
-integer `record_version`. Adding a field is compatible. Removing or renaming a
-field, or changing its meaning, requires the owning schema or record version to
-change. Create `v2` only for an incompatible change to these shared conventions.
+integer `record_version`. Adding a command-result field is compatible because
+result readers ignore unknown fields. Removing or renaming a field, or changing
+its meaning, requires the owning schema or record version to change.
+
+Each command explicitly defines its portable import shapes. A lossless importer
+may require an exact field set and reject unknown fields rather than silently
+discard data it cannot preserve. Adding a field to such a closed interchange
+shape requires a new `record_version`; this is separate from additive command
+results. Create `v2` only for an incompatible change to these shared conventions.
 
 ## Text and streams
 
@@ -30,7 +36,8 @@ change. Create `v2` only for an incompatible change to these shared conventions.
 JSONL output is compact UTF-8 JSON: one complete object per non-empty line, no
 array wrapper, and one final LF per object. Literal Unicode is valid and
 preferred over ASCII escapes when the encoder supports it. Producers must not
-split an object across lines. Consumers ignore fields they do not understand.
+split an object across lines. Command-result readers ignore fields they do not
+understand; portable importers follow their documented versioned field contract.
 
 ## Common fields and time
 
@@ -66,6 +73,8 @@ as `resource not found`. Diagnostics must not echo sensitive record content.
 ```
 
 Ordinary domain states belong in structured output, not exit codes.
+A consumer-closed stdout pipe is a successful early exit without a diagnostic
+or traceback.
 
 ## Data locations
 

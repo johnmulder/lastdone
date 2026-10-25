@@ -57,7 +57,8 @@ and never converted.
 
 ## Common behavior
 
-- Text is UTF-8 and lines end with LF.
+- Text is UTF-8 and lines end with LF, independently of the process locale or
+  Python's configured standard-stream encoding.
 - Results go to stdout. Diagnostics go to stderr.
 - Successful commands write nothing to stderr.
 - Failed commands write nothing to stdout.
@@ -197,8 +198,11 @@ Produced once by `doctor --jsonl`:
 `conventions` is `problems` when `convention_issues` reports invalid stored keys,
 control characters, or non-NFC human text; these checks never rewrite data.
 
-Adding a field is backward-compatible. Removing a field, renaming a field, or
-changing a field's meaning requires a new `schema_version`.
+Command-result readers ignore unknown fields, so adding a result field is
+backward-compatible. Removing a field, renaming a field, or changing a field's
+meaning requires a new `schema_version`. This result-reader rule does not relax
+the exact portable import shapes below: an importer rejects unknown fields
+rather than silently discarding data its storage cannot preserve.
 
 ## Interchange records
 
