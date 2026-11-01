@@ -15,18 +15,18 @@ this command-specific contract. Its version is independent of this CLI version.
 lastdone [--db PATH] add KEY [--date YYYY-MM-DD] [--reading VALUEUNIT]
          [--allow-decrease] [--jsonl]
 lastdone [--db PATH] batch --jsonl
-lastdone [--db PATH] show KEY [--jsonl]
-lastdone [--db PATH] history KEY [--include-corrections] [--jsonl]
-lastdone [--db PATH] list [--jsonl]
+lastdone [--read-only] [--db PATH] show KEY [--jsonl]
+lastdone [--read-only] [--db PATH] history KEY [--include-corrections] [--jsonl]
+lastdone [--read-only] [--db PATH] list [--jsonl]
 lastdone [--db PATH] void EVENT_ID --reason TEXT [--jsonl]
 lastdone [--db PATH] replace EVENT_ID --reason TEXT
          [--name KEY] [--date YYYY-MM-DD] [--note TEXT]
          [--reading VALUEUNIT] [--allow-decrease] [--jsonl]
 lastdone [--db PATH] set KEY [--every Nd] [--display-name TEXT] [--jsonl]
-lastdone [--db PATH] due [--overdue] [--jsonl]
-lastdone [--db PATH] export --jsonl
+lastdone [--read-only] [--db PATH] due [--overdue] [--jsonl]
+lastdone [--read-only] [--db PATH] export --jsonl
 lastdone [--db PATH] import --jsonl
-lastdone [--db PATH] doctor [--jsonl]
+lastdone [--read-only] [--db PATH] doctor [--jsonl]
 lastdone --help
 lastdone --version
 ```
@@ -99,6 +99,45 @@ Before rebuilding an existing unversioned database, `lastdone` creates
 adds nullable columns, so it does not need a recovery copy. A newer schema
 version, an unrecognized schema, or schema drift is a storage error and returns
 3 without mutating the database.
+
+## Read-only snapshots
+
+The opt-in global `--read-only` flag must appear before the command. It permits
+only `list`, `show`, `history`, `due`, `export` and `doctor`. A mutating command
+returns validation exit 2 before opening any store or reading its input stream.
+The ordinary initialization, migration and permission behavior above continues
+when this flag is absent.
+
+Read-only mode requires an existing schema-5 quiescent snapshot and POSIX guarded
+file-descriptor access. It opens a regular single-link database with no symlink
+in any path component, using SQLite `mode=ro&immutable=1`, `query_only=ON` and
+`trusted_schema=OFF`. Relative paths are made absolute from the current working
+directory; parent traversal is rejected. It never creates parent directories,
+initializes or migrates a database, changes permissions, writes a journal,
+checkpoints, cleans up sidecars or repairs source data. Schema, integrity and
+foreign-key validation remain required.
+
+Any existing `-wal`, `-shm` or `-journal` sidecar causes a storage failure, including
+an empty sidecar. Live WAL reading and recovery are outside this interface.
+Do not remove sidecars to make a query pass; prepare a quiescent current-schema
+source separately through the owning application's normal process.
+
+The reader records the source's file identity, mode, size, modification/change
+times and SHA-256, then verifies the path and content again before emitting
+results. Output is buffered in memory with an 8 MiB UTF-8 limit. A source change,
+replacement, unsafe path, unsupported schema, malformed store or output overflow
+returns storage exit 3 with no stdout. Missing stores are not initialized. An
+unhealthy completed `doctor` report retains its documented output/exit exception.
+
+The record meanings and schemas remain unchanged. Export preserves all imported
+opaque IDs, names and correction links under `record_version: 5`; it does not
+restrict existing values to the grammar for interactive creation. Summaries and
+due dates still use the command's local-calendar semantics. No date-window or
+timezone flag is added, and date-only records acquire no implied midnight.
+
+Verification establishes an observed snapshot; it is not a tamper-proof store or
+a guarantee against changes after observation. Callers needing bounded execution
+must additionally apply their own time/resource/output and network confinement.
 
 ## JSONL records
 

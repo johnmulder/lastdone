@@ -50,6 +50,25 @@ lastdone import --jsonl < lastdone-backup.jsonl
 By default, data is stored at `~/.local/share/last/last.db`. Override this with
 `--db PATH` or the `LASTDONE_DB` environment variable.
 
+## Read-only snapshots
+
+Use the opt-in global `--read-only` flag to query an existing quiescent,
+current-schema database without initialization, migrations or permission changes:
+
+```sh
+lastdone --read-only --db /absolute/canonical/last.db list --jsonl
+lastdone --read-only --db /absolute/canonical/last.db export --jsonl
+```
+
+It permits `list`, `show`, `history`, `due`, `export` and `doctor`; write commands
+are rejected before the store opens. The guarded snapshot requires POSIX file
+access, rejects symlinks, hardlinks and WAL/SHM/journal sidecars, and verifies source
+identity/content before releasing results. Do not delete sidecars to bypass this
+check. Missing, outdated, changed or unsafe snapshots fail without repair.
+Read-only output is bounded to 8 MiB and buffered until verification completes.
+The existing JSONL formats and command-specific time semantics are unchanged.
+See the [read-only contract](CLI.md#read-only-snapshots) for details.
+
 ## Documentation
 
 - [CLI contract](CLI.md) — commands, output formats, validation, and exit codes

@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, redirect_stdout
 from decimal import Decimal, localcontext
 from functools import partial
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -15,7 +18,7 @@ import stat
 import sys
 import unicodedata
 from datetime import date, datetime, timezone
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 from uuid import uuid4
 
 
@@ -23,6 +26,7 @@ VERSION = "0.10.0"
 SCHEMA_VERSION = 5
 BUSY_TIMEOUT_SECONDS = 5.0
 SQLITE_MAX_INTEGER = 2**63 - 1
+READ_ONLY_OUTPUT_BYTES = 8 * 1024 * 1024
 
 
 class ActivityNotFound(Exception):
@@ -191,6 +195,11 @@ def parse_args(
         dest="database",
         metavar="PATH",
         help="use PATH as the database",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="query an existing current-schema quiescent snapshot without writes",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -741,6 +750,150 @@ def connect_read_only(path: Path) -> tuple[Path, sqlite3.Connection]:
     database.row_factory = sqlite3.Row
     database.execute("PRAGMA foreign_keys = ON")
     return resolved, database
+
+
+def open_snapshot(path: Path) -> int:
+    """Open a regular single-link snapshot without following any symlink."""
+    if ".." in path.parts:
+        raise OSError(
+            "read-only snapshot path must not contain parent traversal"
+        )
+    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in path.parts[1:-1]:
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory,
+            )
+            os.close(directory)
+            directory = child
+        for suffix in ("-wal", "-shm", "-journal"):
+            try:
+                os.stat(
+                    path.name + suffix, dir_fd=directory, follow_symlinks=False
+                )
+            except FileNotFoundError:
+                continue
+            raise OSError(
+                "read-only snapshot must have no WAL/SHM/journal sidecars"
+            )
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory,
+        )
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise OSError(
+                    "read-only snapshot must be a regular single-link file"
+                )
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+    finally:
+        os.close(directory)
+
+
+def snapshot_metadata(descriptor: int) -> tuple[int, ...]:
+    info = os.fstat(descriptor)
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_nlink,
+    )
+
+
+def snapshot_identity(descriptor: int) -> tuple[tuple[int, ...], str]:
+    before = snapshot_metadata(descriptor)
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < before[3]:
+        chunk = os.pread(
+            descriptor, min(1024 * 1024, before[3] - offset), offset
+        )
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+    if snapshot_metadata(descriptor) != before or offset != before[3]:
+        raise OSError("read-only snapshot changed while being read")
+    return before, digest.hexdigest()
+
+
+def verify_snapshot(path: Path, expected: tuple[tuple[int, ...], str]) -> None:
+    descriptor = open_snapshot(path)
+    try:
+        if snapshot_identity(descriptor) != expected:
+            raise OSError("read-only snapshot changed or was replaced")
+    finally:
+        os.close(descriptor)
+    # A WAL can appear without changing the main database file.
+    descriptor = open_snapshot(path)
+    try:
+        if snapshot_metadata(descriptor) != expected[0]:
+            raise OSError("read-only snapshot changed during verification")
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def snapshot_database(path: Path) -> Iterator[tuple[Path, sqlite3.Connection]]:
+    if os.name != "posix" or not hasattr(os, "pread"):
+        raise OSError("read-only snapshots require POSIX guarded file access")
+    if ".." in path.parts:
+        raise OSError(
+            "read-only snapshot path must not contain parent traversal"
+        )
+    selected = Path(os.path.abspath(path))
+    descriptor = open_snapshot(selected)
+    database = None
+    try:
+        identity = snapshot_identity(descriptor)
+        database = sqlite3.connect(
+            f"file:/dev/fd/{descriptor}?mode=ro&immutable=1",
+            uri=True,
+            timeout=BUSY_TIMEOUT_SECONDS,
+        )
+        database.row_factory = sqlite3.Row
+        database.execute("PRAGMA foreign_keys = ON")
+        database.execute("PRAGMA query_only = ON")
+        database.execute("PRAGMA trusted_schema = OFF")
+        version = database_schema_version(database)
+        if version != SCHEMA_VERSION:
+            raise sqlite3.DatabaseError(
+                f"read-only queries require schema {SCHEMA_VERSION}, found {version}"
+            )
+        validate_schema(database)
+        verify_snapshot(selected, identity)
+        yield selected, database
+        verify_snapshot(selected, identity)
+    finally:
+        if database is not None:
+            database.close()
+        os.close(descriptor)
+
+
+class SnapshotOutput(io.StringIO):
+    """Bound stdout while keeping unverified observations out of the stream."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.byte_count = 0
+
+    def write(self, text: str) -> int:
+        self.byte_count += len(text.encode("utf-8"))
+        if self.byte_count > READ_ONLY_OUTPUT_BYTES:
+            raise sqlite3.DatabaseError(
+                "read-only output exceeds the 8 MiB bound"
+            )
+        return super().write(text)
 
 
 def current_timestamp(now: datetime) -> str:
@@ -1898,8 +2051,17 @@ def stored_convention_issues(database: sqlite3.Connection) -> list[str]:
     return issues
 
 
-def doctor_database(path: Path, args: argparse.Namespace) -> int:
-    resolved, database = connect_read_only(path)
+def doctor_database(
+    path: Path,
+    args: argparse.Namespace,
+    *,
+    database: sqlite3.Connection | None = None,
+) -> int:
+    owns_database = database is None
+    if database is None:
+        resolved, database = connect_read_only(path)
+    else:
+        resolved = path
     try:
         database.execute("BEGIN")
         version: int | None = None
@@ -2040,7 +2202,8 @@ def doctor_database(path: Path, args: argparse.Namespace) -> int:
             print(f"Status: {status}")
         return 0 if status == "ok" else 3
     finally:
-        database.close()
+        if owns_database:
+            database.close()
 
 
 def silence_broken_pipe() -> None:
@@ -2077,8 +2240,23 @@ def run(
         now = datetime.now().astimezone()
     args = parse_args(argv, today=now.date())
     args.now = now
+    if args.read_only and args.command not in {
+        "list", "show", "history", "due", "export", "doctor"
+    }:
+        raise InvalidActivityUpdate("command is not permitted in read-only mode")
     if path is None:
         path = args.database if args.database is not None else database_path()
+    if args.read_only:
+        with SnapshotOutput() as output:
+            with snapshot_database(path) as (selected, database):
+                with redirect_stdout(output):
+                    result = (
+                        doctor_database(selected, args, database=database)
+                        if args.command == "doctor"
+                        else args.handler(database, args)
+                    )
+            sys.stdout.write(output.getvalue())
+            return result
     if args.command == "doctor":
         return args.handler(path, args)
     database = connect_database(path)
